@@ -29,7 +29,7 @@ function optional(name: string): string | undefined {
 }
 
 export const config = {
-  botName: process.env.BOT_NAME?.trim() || "Pilot",
+  botName: process.env.BOT_NAME?.trim() || "Blip",
   // Telegram is an optional extra channel; the app works without it.
   telegramToken: optional("TELEGRAM_BOT_TOKEN"),
   ownerId: Number(optional("TELEGRAM_OWNER_ID") ?? 0),

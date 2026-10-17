@@ -4,7 +4,7 @@ import { personaFor, teamAgents } from "./bots.js";
 import { config } from "./config.js";
 import { makeCanUseTool } from "./permissions.js";
 import { recordCost, spentToday, state, type BotProfile } from "./store.js";
-import { createPilotServer } from "./tools.js";
+import { createBlipServer } from "./tools.js";
 
 type Content = SDKUserMessage["message"]["content"];
 export type Todo = { content: string; status: string; activeForm?: string };
@@ -108,7 +108,7 @@ export function startAgent(params: {
       env,
       mcpServers: {
         ...connectorServers(),
-        pilot: createPilotServer(params.bot),
+        blip: createBlipServer(params.bot),
         browser: {
           type: "stdio",
           command: process.execPath,
@@ -198,10 +198,10 @@ function stepLabel(name: string, input: Record<string, unknown>, viaTeammate: bo
   if (name === "WebFetch") return `${by}Reading ${s(input.url)}`;
   if (name === "TodoWrite") return `${by}Updating plan`;
   if (name.startsWith("mcp__browser__")) return `${by}Browser · ${name.replace("mcp__browser__browser_", "").replace(/_/g, " ")}${input.url ? ` ${s(input.url, 60)}` : input.element ? ` “${s(input.element, 50)}”` : ""}`;
-  if (name.startsWith("mcp__pilot__mac_")) return `${by}Mac · ${name.replace("mcp__pilot__mac_", "").replace(/_/g, " ")}${input.app ? ` ${s(input.app)}` : input.why ? ` ${s(input.why, 50)}` : ""}`;
+  if (name.startsWith("mcp__blip__mac_")) return `${by}Mac · ${name.replace("mcp__blip__mac_", "").replace(/_/g, " ")}${input.app ? ` ${s(input.app)}` : input.why ? ` ${s(input.why, 50)}` : ""}`;
   if (["Read", "Write", "Edit"].includes(name)) return `${by}${name === "Read" ? "Reading" : name === "Write" ? "Writing" : "Editing"} ${s(input.file_path).split("/").pop()}`;
   if (name === "Glob" || name === "Grep") return `${by}Looking through files`;
-  if (name.startsWith("mcp__pilot__")) return `${by}${name.replace("mcp__pilot__", "").replace(/_/g, " ")}`;
+  if (name.startsWith("mcp__blip__")) return `${by}${name.replace("mcp__blip__", "").replace(/_/g, " ")}`;
   if (name === "Skill") return `${by}Using skill ${s(input.skill ?? input.name)}`;
   if (name.startsWith("mcp__")) return `${by}${name.replace(/^mcp__/, "").replace(/__/g, " · ").replace(/_/g, " ")}`;
   return `${by}${name}`;

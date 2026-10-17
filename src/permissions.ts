@@ -15,12 +15,12 @@ const READ_ONLY_SAFE = new Set([
   "mcp__browser__browser_take_screenshot", "mcp__browser__browser_tabs", "mcp__browser__browser_wait_for",
   "mcp__browser__browser_console_messages", "mcp__browser__browser_resize", "mcp__browser__browser_hover",
   "mcp__browser__browser_find", "mcp__browser__browser_close",
-  "mcp__pilot__mac_screenshot", "mcp__pilot__mac_scroll", "mcp__pilot__list_routines", "mcp__pilot__suggest",
+  "mcp__blip__mac_screenshot", "mcp__blip__mac_scroll", "mcp__blip__list_routines", "mcp__blip__suggest",
 ]);
 // Also safe outside read-only runs: delegating to teammates and the bot's own bookkeeping tools.
 const SAFE = new Set([
   ...READ_ONLY_SAFE, "Task", "Agent", "mcp__browser__browser_install",
-  "mcp__pilot__send_to_phone", "mcp__pilot__add_routine", "mcp__pilot__remove_routine", "mcp__pilot__save_skill",
+  "mcp__blip__send_to_phone", "mcp__blip__add_routine", "mcp__blip__remove_routine", "mcp__blip__save_skill",
 ]);
 // Tools that act on screens and pages as the user. These never get a permanent "Always allow": what they do
 // depends on *what* is clicked or typed, not the tool (Muse users had standing approvals share a home address).
@@ -29,7 +29,7 @@ const INTERACTIVE = new Set([
   "mcp__browser__browser_press_key", "mcp__browser__browser_select_option", "mcp__browser__browser_file_upload",
   "mcp__browser__browser_drag", "mcp__browser__browser_drop", "mcp__browser__browser_handle_dialog",
   "mcp__browser__browser_evaluate", "mcp__browser__browser_run_code_unsafe",
-  "mcp__pilot__mac_click", "mcp__pilot__mac_type", "mcp__pilot__mac_key",
+  "mcp__blip__mac_click", "mcp__blip__mac_type", "mcp__blip__mac_key",
 ]);
 // Built-in guard, enforced in code rather than by prompt: actions that look like sending, paying, deleting or
 // committing always come to the user, whatever the bot was told and whatever rules say.
@@ -77,8 +77,8 @@ function proposedAllowRule(toolName: string, input: Record<string, unknown>): Om
     if (!word || !SIMPLE_COMMAND(cmd) || NEVER_ALWAYS.includes(word)) return undefined;
     return { effect: "allow", tool: "Bash", match: `${word} ` };
   }
-  if (WRITE_TOOLS.has(toolName) || INTERACTIVE.has(toolName) || toolName === "mcp__pilot__add_connector") return undefined;
-  if (toolName.startsWith("mcp__") && !toolName.startsWith("mcp__pilot__")) return undefined; // connector writes
+  if (WRITE_TOOLS.has(toolName) || INTERACTIVE.has(toolName) || toolName === "mcp__blip__add_connector") return undefined;
+  if (toolName.startsWith("mcp__") && !toolName.startsWith("mcp__blip__")) return undefined; // connector writes
   return { effect: "allow", tool: toolName };
 }
 
@@ -117,14 +117,14 @@ export function addRule(rule: Omit<Rule, "id">) {
 }
 
 export function describeAction(toolName: string, input: Record<string, unknown>): string {
-  const name = toolName.replace(/^mcp__browser__browser_/, "browser ").replace(/^mcp__pilot__/, "").replace(/^mcp__/, "");
+  const name = toolName.replace(/^mcp__browser__browser_/, "browser ").replace(/^mcp__blip__/, "").replace(/^mcp__/, "");
   if (toolName === "Bash") return `Run in terminal:\n${String(input.command)}`;
   if (WRITE_TOOLS.has(toolName)) return `${name} file:\n${String(input.file_path ?? input.notebook_path)}`;
   if (READ_TOOLS.has(toolName)) return `${name}:\n${String(input.file_path ?? input.path ?? input.pattern)}`;
-  if (toolName === "mcp__pilot__mac_type") return `Type on the Mac:\n${String(input.text)}`;
-  if (toolName === "mcp__pilot__mac_click") return `Click on the Mac:\n${input.why ? String(input.why) : `at (${input.x}, ${input.y})`}`;
-  if (toolName === "mcp__pilot__mac_key") return `Press keys on the Mac:\n${String(input.keys)}`;
-  if (toolName === "mcp__pilot__mac_open_app") return `Open an app:\n${String(input.app)}`;
+  if (toolName === "mcp__blip__mac_type") return `Type on the Mac:\n${String(input.text)}`;
+  if (toolName === "mcp__blip__mac_click") return `Click on the Mac:\n${input.why ? String(input.why) : `at (${input.x}, ${input.y})`}`;
+  if (toolName === "mcp__blip__mac_key") return `Press keys on the Mac:\n${String(input.keys)}`;
+  if (toolName === "mcp__blip__mac_open_app") return `Open an app:\n${String(input.app)}`;
   // Browser actions in plain words: what is clicked, what is typed, where.
   const el = input.element ? `“${String(input.element)}”` : "";
   if (toolName === "mcp__browser__browser_click") return `Click in the browser:\n${el || "an element"}${input.doubleClick ? " (double-click)" : ""}`;
@@ -202,7 +202,7 @@ export function makeCanUseTool(ctx: RunContext): CanUseTool {
       ? resolvePath(input.file_path ?? input.notebook_path ?? input.path) ?? config.workspace
       : undefined;
     const [prefix, server, ...rest] = toolName.split("__");
-    const connectorName = prefix === "mcp" && server && !["pilot", "browser"].includes(server) ? server : undefined;
+    const connectorName = prefix === "mcp" && server && !["blip", "browser"].includes(server) ? server : undefined;
     const connectorReadOnly = connectorName ? READ_VERB.test(rest.join("__")) : false;
 
     // 1. Read-only runs (proactive check-ins) can look but never touch.
@@ -213,8 +213,8 @@ export function makeCanUseTool(ctx: RunContext): CanUseTool {
     }
 
     // 2. Cards that always involve the user.
-    if (toolName === "mcp__pilot__propose_draft") return draftCard(input, ctx.bot, signal);
-    if (toolName === "mcp__pilot__request_takeover") return takeoverCard(input, ctx.bot, signal);
+    if (toolName === "mcp__blip__propose_draft") return draftCard(input, ctx.bot, signal);
+    if (toolName === "mcp__blip__request_takeover") return takeoverCard(input, ctx.bot, signal);
 
     // 3. Connector access level (Muse-style read-only / full access per app).
     if (connectorName) {
@@ -242,7 +242,7 @@ export function makeCanUseTool(ctx: RunContext): CanUseTool {
     // 5. Auto Review decides between running it, asking you, or flagging it as dangerous.
     let reviewNote = "";
     let risky = sensitive || committing;
-    if (!askFirst && !sensitive && !committing && state.settings.autoReview && toolName !== "mcp__pilot__add_connector") {
+    if (!askFirst && !sensitive && !committing && state.settings.autoReview && toolName !== "mcp__blip__add_connector") {
       const review = await autoReview(ctx.request, ctx.bot.name, summary);
       if (review.verdict === "allow") return allow("auto-review", { reason: review.reason });
       reviewNote = `\n\n${review.verdict === "deny" ? "Auto Review: high risk" : "Auto Review"} — ${review.reason}`;

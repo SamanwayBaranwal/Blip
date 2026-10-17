@@ -342,3 +342,57 @@ textarea.input { height: auto; padding: 10px 13px; }
 @keyframes slideup { from { transform: translateY(28px); opacity: 0; } }
 @keyframes ripple { from { transform: scale(0.4); opacity: 1; } to { transform: scale(1.6); opacity: 0; } }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* ---------- Blip, the mascot: a mouse pointer that came alive ----------
+   States follow the agent: idle (bob + blink), working (clicks, ripples), needs (hops, amber "!"),
+   done (happy eyes, sparkles), sleep (zz). In light mode the character inverts to black. */
+:root { --m-body: #f4f4f6; --m-ink: #0b0b0c; --m-blush: rgba(255, 138, 160, 0.55); --m-amber: #f2a93b; }
+:root[data-theme="light"] { --m-body: #0b0b0c; --m-ink: #ffffff; }
+@media (prefers-color-scheme: light) { :root[data-theme="auto"] { --m-body: #0b0b0c; --m-ink: #ffffff; } }
+.m { display: block; flex: none; line-height: 0; }
+.m svg { display: block; width: 100%; height: auto; overflow: visible; }
+.m .bd { fill: var(--m-body); stroke: var(--m-body); }
+.m .ink { fill: var(--m-ink); }
+.m .hl { fill: var(--m-body); }
+.m .inks { stroke: var(--m-ink); fill: none; stroke-width: 4; stroke-linecap: round; }
+.m .ck { fill: var(--m-blush); }
+.m .fx-ring { fill: none; stroke: var(--text); stroke-width: 3; }
+.m .bang rect { fill: var(--m-amber); }
+.m .bang path { fill: #000; }
+.m .spark { fill: var(--text); }
+.m .zz { fill: var(--text-2); font: 600 22px var(--font); }
+.m .g-body { transform-box: fill-box; transform-origin: 30% 20%; animation: m-bob 3.2s ease-in-out infinite; }
+.m .eo { transform-box: fill-box; transform-origin: center; animation: m-blink 4.6s infinite; }
+.m .eh, .m .ec, .m .mo-o, .m .mo-big, .m .fx-work, .m .bang, .m .spark-g, .m .zz-g { display: none; }
+.m[data-state="working"] .g-body { animation: m-tap 1s ease-in-out infinite; }
+.m[data-state="working"] .eyes-open { animation: m-look 1.8s ease-in-out infinite; }
+.m[data-state="working"] .fx-work { display: inline; }
+.m[data-state="working"] .mo-smile, .m[data-state="needs"] .mo-smile, .m[data-state="done"] .mo-smile, .m[data-state="sleep"] .mo-smile { display: none; }
+.m[data-state="working"] .mo-o, .m[data-state="needs"] .mo-o { display: inline; }
+.m[data-state="needs"] .g-body { animation: m-hop 0.9s cubic-bezier(.3,.7,.4,1) infinite; transform-origin: 50% 100%; }
+.m[data-state="needs"] .bang { display: inline; transform-box: fill-box; transform-origin: 0% 100%; animation: m-pop 0.9s ease-in-out infinite; }
+.m[data-state="done"] .g-body { animation: m-wiggle 1.6s ease-in-out infinite; }
+.m[data-state="done"] .eo, .m[data-state="sleep"] .eo { display: none; }
+.m[data-state="done"] .eh, .m[data-state="done"] .mo-big, .m[data-state="done"] .spark-g { display: inline; }
+.m[data-state="done"] .spark { transform-box: fill-box; transform-origin: center; animation: m-twinkle 1.4s ease-in-out infinite; }
+.m[data-state="done"] .spark:nth-child(2) { animation-delay: 0.45s; }
+.m[data-state="done"] .spark:nth-child(3) { animation-delay: 0.9s; }
+.m[data-state="sleep"] .g-body { animation-duration: 5.5s; }
+.m[data-state="sleep"] .ec, .m[data-state="sleep"] .zz-g { display: inline; }
+.m[data-state="sleep"] .zz { animation: m-drift 3s ease-in infinite; }
+.m[data-state="sleep"] .zz:nth-child(2) { animation-delay: 1.5s; }
+.m .ripple { transform-box: fill-box; transform-origin: center; animation: m-ripple 1s ease-out infinite; }
+.m .ripple:nth-child(2) { animation-delay: 0.5s; }
+.m.still *, .m.still { animation: none !important; }
+.avatar .m { width: 84%; }
+.brand .m, .login-box .m, .boot .m { flex: none; }
+@keyframes m-bob { 50% { transform: translateY(-4%); } }
+@keyframes m-tap { 0%, 100% { transform: rotate(0) translateY(0); } 40% { transform: rotate(-4deg) translateY(3%); } }
+@keyframes m-hop { 0%, 100% { transform: translateY(0) scaleY(1); } 15% { transform: translateY(0) scaleY(0.94); } 45% { transform: translateY(-10%) scaleY(1.03); } 70% { transform: translateY(0) scaleY(0.97); } }
+@keyframes m-wiggle { 0%, 100% { transform: rotate(0); } 25% { transform: rotate(-5deg); } 75% { transform: rotate(5deg); } }
+@keyframes m-blink { 0%, 93%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.12); } }
+@keyframes m-look { 0%, 100% { transform: translateX(-3px); } 50% { transform: translateX(3px); } }
+@keyframes m-ripple { from { transform: scale(0.3); opacity: 1; } to { transform: scale(1.6); opacity: 0; } }
+@keyframes m-pop { 0%, 100% { transform: scale(1); } 40% { transform: scale(1.12); } }
+@keyframes m-twinkle { 0%, 100% { transform: scale(0.4); opacity: 0.3; } 50% { transform: scale(1); opacity: 1; } }
+@keyframes m-drift { from { transform: translate(0, 0); opacity: 0; } 20% { opacity: 1; } to { transform: translate(14px, -30px); opacity: 0; } }

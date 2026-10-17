@@ -1,18 +1,34 @@
-# Pilot: context for Claude
+# Blip: context for Claude
 
 Read this first. It carries over what earlier sessions built, decided and learned, because chat memory doesn't move between Macs. The user-facing setup is in `README.md`, and the product research is in `docs/RESEARCH.md`.
 
 ## What this is
 
-Pilot is the user's personal, always-on AI agent system. It runs on a dedicated spare MacBook and is controlled from their phone. **The goal is a 1:1 match with xAI's Grok Bot**, plus the best of ChatGPT Dots and Meta Muse.
+Blip is the user's personal, always-on AI agent system. It runs on a dedicated spare MacBook and is controlled from their phone. **The goal is a 1:1 match with xAI's Grok Bot**, plus the best of ChatGPT Dots and Meta Muse.
 
 It's built on the **Claude Agent SDK** (TypeScript). Each bot run is a `query()` with built-in tools (Bash, files, web) plus:
 
 - a Playwright MCP browser using real Chrome and a persistent profile in `data/browser-profile`
-- Pilot's own in-process MCP tools (`src/tools.ts`)
+- Blip's own in-process MCP tools (`src/tools.ts`)
 - user-added connectors
 
 The UI is a PWA served by `src/web.ts`. Telegram is an optional mirror channel.
+
+## Brand: Blip
+
+- The platform **and** its mascot are both called **Blip**, chosen by the user on 2026-10-17.
+- The mascot is a mouse pointer that came alive (it clicks for you). It follows the "cute, but capable" direction: cute like Muse's Jolly or the Dots crew, but clever rather than babyish, and monochrome to fit the app.
+- It's drawn in `web/app.js` (`BLIP_SVG`, `<Blip state size still tight />`), with styles under the mascot section of `web/styles.css`.
+- **States:**
+  - `idle`: bobs and blinks
+  - `working`: tapping, with click ripples
+  - `needs`: hops, with an amber "!"
+  - `done`: happy eyes and sparkles
+  - `sleep`: zz
+- Avatars mirror each bot's live state. In light mode the character inverts to black.
+- The app icon is `web/icon.svg`, rendered to `icon-512.png` with `qlmanage`.
+- Use the mascot, never emoji. The original concept page is the "Pilot Mascot Lab" artifact.
+- **The rename.** The project used to be called Pilot. Everything was renamed: `blip.sh`, the `com.blip.agent` service, the in-process MCP server `blip` (so tools are `mcp__blip__*`), and the `blip` cookie. The install moved from `~/PilotBot` to `~/Blip`.
 
 ## About the user and how to work with them
 
@@ -33,7 +49,7 @@ The UI is a PWA served by `src/web.ts`. Telegram is an optional mirror channel.
 - **Auth.** With `ANTHROPIC_API_KEY` empty, the SDK uses the Claude Code login in this Mac's keychain (the user's Claude plan). This was tested and works. `review.ts` then runs Auto Review through the Agent SDK, using `outputFormat` with a JSON schema. With a key set, usage is pay-as-you-go with a daily budget (`maxBudgetUsd`), and Auto Review uses the Messages API with `zodOutputFormat`.
   - The key can be added in the app (`POST /api/setup/key`, written to `.env`).
   - The agent's env strips `CLAUDE*` and `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL`, so a parent Claude Code session's connection never leaks in.
-- **Install location.** The project must live outside Desktop, Documents and Downloads, because macOS TCC blocks launchd agents there. `pilot.sh` enforces this. The intended location is `~/PilotBot`.
+- **Install location.** The project must live outside Desktop, Documents and Downloads, because macOS TCC blocks launchd agents there. `blip.sh` enforces this. The intended location is `~/Blip`.
 - **One task at a time.** There's a global queue in `core.ts` because all bots share one Mac, one screen and one Chrome profile. Running bots in parallel is a known gap.
 - **Approvals** (`permissions.ts`):
   - Safe tools run automatically.
@@ -63,8 +79,8 @@ The UI is a PWA served by `src/web.ts`. Telegram is an optional mirror channel.
 ## Developing
 
 ```bash
-npm run build && ./pilot.sh restart     # after code changes (web/ files are served live; no restart needed)
-./pilot.sh logs
+npm run build && ./blip.sh restart     # after code changes (web/ files are served live; no restart needed)
+./blip.sh logs
 ```
 
 UI checks are done with Playwright (`require("playwright")`, with `channel: "chrome"`):
@@ -73,7 +89,7 @@ UI checks are done with Playwright (`require("playwright")`, with `channel: "chr
 - Log in through `/login?code=<data/app-access-code>`.
 - Take screenshots at 1440×900 and 390×844.
 
-To test end to end without the UI, call `POST /api/send` with the `pilot=<code>` cookie, then poll `GET /api/thread/:botId`.
+To test end to end without the UI, call `POST /api/send` with the `blip=<code>` cookie, then poll `GET /api/thread/:botId`.
 
 ## Status as of 2026-10-17
 

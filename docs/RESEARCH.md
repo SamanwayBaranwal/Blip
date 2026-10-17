@@ -1,6 +1,6 @@
 # Research: Grok Bot, ChatGPT Dots, Meta Muse
 
-Gathered on 2026-10-17 to shape Pilot. Most of it comes from official docs and hands-on reviews. Reddit and X were hard to fetch, so posts from there come quoted in articles. All three products were 3–10 weeks old, so many user reports cover only a few days of use.
+Gathered on 2026-10-17 to shape Blip. Most of it comes from official docs and hands-on reviews. Reddit and X were hard to fetch, so posts from there come quoted in articles. All three products were 3–10 weeks old, so many user reports cover only a few days of use.
 
 ## The products
 
@@ -42,9 +42,9 @@ Gathered on 2026-10-17 to shape Pilot. Most of it comes from official docs and h
 - **Business routines:** competitor scans to Notion, meeting prep, invoice hunting, content pipelines, nightly memory cleanup.
 - **Bot teams:** a Chief of Staff bot manages specialists, and only yes/no decisions reach the user.
 
-## Complaints, and how Pilot answers them
+## Complaints, and how Blip answers them
 
-| Complaint | Pilot |
+| Complaint | Blip |
 |---|---|
 | Usage drains fast with no warning; no model picker (Grok #1) | Budget warnings at 50/80/100%, a model per bot, cost per reply and per run, spend per bot |
 | Context grows forever and costs more | Context meter, a prompt to start fresh, a fresh-chat button |

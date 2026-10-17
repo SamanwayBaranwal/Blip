@@ -26,9 +26,9 @@ async function screenForModel(note: string) {
 }
 
 /** In-process tools for one run: phone delivery, Mac control, routines, skills, drafts, takeovers, suggestions, connectors. */
-export function createPilotServer(bot: BotProfile) {
+export function createBlipServer(bot: BotProfile) {
   return createSdkMcpServer({
-    name: "pilot",
+    name: "blip",
     tools: [
       tool(
         "send_to_phone",
@@ -207,7 +207,7 @@ export function createPilotServer(bot: BotProfile) {
         },
         async ({ name, type, command, args, env, url, headers, access }) => {
           const key = slug(name).replace(/-/g, "");
-          if (["pilot", "browser"].includes(key)) return text("That name is reserved.", true);
+          if (["blip", "browser"].includes(key)) return text("That name is reserved.", true);
           if (type === "stdio" && !command) return text("stdio connectors need a command.", true);
           if (type === "http" && !url) return text("http connectors need a url.", true);
           state.connectors[key] = { type, command, args, env, url, headers, access: access ?? "read" };

@@ -27,7 +27,7 @@ async function capture(file: string, args: string[]) {
     // fall through to the check below
   }
   if (!fs.existsSync(file)) {
-    throw new Error("macOS blocked the screenshot. Turn on 'node' under System Settings → Privacy & Security → Screen & System Audio Recording, then run: ~/PilotBot/pilot.sh restart");
+    throw new Error("macOS blocked the screenshot. Turn on 'node' under System Settings → Privacy & Security → Screen & System Audio Recording, then run: ~/Blip/blip.sh restart");
   }
 }
 

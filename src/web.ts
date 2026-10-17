@@ -37,11 +37,11 @@ const matches = (given: unknown) => {
   const b = Buffer.from(accessCode);
   return a.length === b.length && timingSafeEqual(a, b);
 };
-const cookieOf = (req: Request) => /(?:^|;\s*)pilot=([^;]+)/.exec(req.headers.cookie ?? "")?.[1];
+const cookieOf = (req: Request) => /(?:^|;\s*)blip=([^;]+)/.exec(req.headers.cookie ?? "")?.[1];
 
 function setSession(req: Request, res: Response) {
   const secure = req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
-  res.setHeader("Set-Cookie", `pilot=${accessCode}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000${secure}`);
+  res.setHeader("Set-Cookie", `blip=${accessCode}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000${secure}`);
 }
 
 function auth(req: Request, res: Response, next: NextFunction) {

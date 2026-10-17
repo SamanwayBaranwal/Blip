@@ -163,13 +163,36 @@ const I = {
   pauseCircle: () => svg(html`<circle cx="12" cy="12" r="9" /><path d="M10 9v6M14 9v6" />`),
   dash: () => svg(html`<circle cx="12" cy="12" r="9" /><path d="M8.5 12h7" />`),
 };
-const Mark = ({ cls = "mark" }) => html`<svg class=${cls} viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="9.2" stroke="currentColor" stroke-width="1.6" /><path d="M8.2 15.8 15.8 8.2" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" /></svg>`;
+// Blip, the mascot: a mouse pointer that came alive. Its state (idle, working, needs, done, sleep) is CSS-driven.
+const BLIP_SVG = `<svg viewBox="0 0 200 200" aria-hidden="true">
+  <g class="fx-work"><circle class="fx-ring ripple" cx="62" cy="36" r="14"/><circle class="fx-ring ripple" cx="62" cy="36" r="14"/></g>
+  <g class="g-body">
+    <path class="bd" d="M62 34 L62 158 L94 128 L114 172 L136 162 L116 120 L158 120 Z" stroke-width="18" stroke-linejoin="round"/>
+    <g class="eyes-open"><ellipse class="ink eo" cx="84.5" cy="98" rx="5.6" ry="7.4"/><ellipse class="ink eo" cx="109.5" cy="98" rx="5.6" ry="7.4"/>
+      <circle class="hl eo" cx="86.5" cy="95" r="1.8"/><circle class="hl eo" cx="111.5" cy="95" r="1.8"/></g>
+    <path class="inks eh" d="M78.9 100 Q84.5 90.6 90.1 100 M103.9 100 Q109.5 90.6 115.1 100"/>
+    <path class="inks ec" d="M78.9 98 Q84.5 102.4 90.1 98 M103.9 98 Q109.5 102.4 115.1 98"/>
+    <ellipse class="ck" cx="73.9" cy="109.4" rx="6.5" ry="4"/><ellipse class="ck" cx="120.1" cy="109.4" rx="6.5" ry="4"/>
+    <path class="inks mo-smile" d="M92 112 Q97 117 102 112"/>
+    <ellipse class="ink mo-o" cx="97" cy="114" rx="3.6" ry="4.4"/>
+    <path class="ink mo-big" d="M89 111 Q97 123 105 111 Z"/>
+  </g>
+  <g class="bang"><rect x="132" y="60" width="26" height="30" rx="9"/><path d="M142.5 66 h5 l-1 12 h-3 z M145 81 a2.6 2.6 0 1 0 0.01 0z"/></g>
+  <g class="spark-g"><path class="spark" d="M150 40 l3 -9 3 9 9 3 -9 3 -3 9 -3 -9 -9 -3z"/><path class="spark" d="M30 70 l2.4 -7 2.4 7 7 2.4 -7 2.4 -2.4 7 -2.4 -7 -7 -2.4z"/><path class="spark" d="M166 150 l2 -6 2 6 6 2 -6 2 -2 6 -2 -6 -6 -2z"/></g>
+  <g class="zz-g"><text class="zz" x="140" y="58">z</text><text class="zz" x="152" y="44" style="font-size:16px">z</text></g>
+</svg>`;
+// "tight" crops to the character itself (for avatars and the logo) so the face reads at small sizes.
+const BLIP_TIGHT = BLIP_SVG.replace('viewBox="0 0 200 200"', 'viewBox="34 26 152 152"');
+function Blip({ size, state = "idle", still = false, tight = false }) {
+  return html`<div class=${`m ${still ? "still" : ""}`} data-state=${state} style=${size ? `width:${size}px` : ""} dangerouslySetInnerHTML=${{ __html: tight ? BLIP_TIGHT : BLIP_SVG }} />`;
+}
+const Mark = () => html`<${Blip} size=${26} still tight />`;
 
 // ============================================================ small components
-function Avatar({ bot, size = 34, status }) {
-  const initial = (bot?.name || "?").trim().charAt(0).toUpperCase();
-  return html`<div class="avatar" style=${`width:${size}px;height:${size}px;font-size:${Math.round(size * 0.42)}px`}>
-    ${initial}${status ? html`<span class=${`dot ${status}`} />` : null}
+function Avatar({ bot, size = 34, status, still }) {
+  const mood = status === "live" ? "working" : status === "wait" ? "needs" : "idle";
+  return html`<div class="avatar" title=${bot?.name} style=${`width:${size}px;height:${size}px`}>
+    <${Blip} state=${mood} still=${still} tight />${status ? html`<span class=${`dot ${status}`} />` : null}
   </div>`;
 }
 const Switch = ({ on, onChange }) => html`<button class=${`switch ${on ? "on" : ""}`} role="switch" aria-checked=${on} onClick=${() => onChange(!on)} />`;
@@ -220,9 +243,9 @@ function Login({ onDone }) {
     }
   };
   return html`<div class="login"><form class="login-box" onSubmit=${submit}>
-    <${Mark} />
-    <h1>Pilot</h1>
-    <p>${failed ? "That link didn't work. " : ""}Enter your access code. Run <code>~/PilotBot/pilot.sh link</code> on your Mac to see it, or scan its QR code.</p>
+    <div style="margin:0 auto"><${Blip} size=${84} /></div>
+    <h1>Blip</h1>
+    <p>${failed ? "That link didn't work. " : ""}Enter your access code. Run <code>~/Blip/blip.sh link</code> on your Mac to see it, or scan its QR code.</p>
     <input class="input" placeholder="Access code" value=${code} onInput=${(e) => setCode(e.target.value)} autocomplete="one-time-code" autofocus />
     <button class="btn primary" disabled=${!code.trim() || busy}>${busy ? "Checking…" : "Open"}</button>
   </form></div>`;
@@ -233,7 +256,7 @@ function Sidebar({ st, open, onSelect, onSheet, onClose }) {
   const { budget } = st;
   const pct = Math.min(100, (budget.today / budget.limit) * 100);
   return html`<aside class=${`sidebar ${open ? "open" : ""}`}>
-    <div class="brand"><${Mark} />Pilot</div>
+    <div class="brand"><${Mark} />Blip</div>
     <button class="new-btn" onClick=${() => onSheet({ type: "newbot" })}><${I.plus} /> New bot</button>
     <div class="side-scroll">
       <div>
@@ -302,7 +325,7 @@ function TextMsg({ m, bot, onImage }) {
   if (m.role === "system") return html`<div class="msg system"><div class="text" dangerouslySetInnerHTML=${{ __html: md(m.text || "") }} /></div>`;
   const user = m.role === "user";
   return html`<div class=${`msg ${user ? "user" : "bot"}`}>
-    ${user ? null : html`<${Avatar} bot=${bot} size=${28} />`}
+    ${user ? null : html`<${Avatar} bot=${bot} size=${28} still />`}
     <div class="body">
       ${m.meta?.header ? html`<div class="header-line">${m.meta.header}</div>` : null}
       ${m.text?.trim() ? html`<div class=${`text ${m.meta?.error ? "error" : ""}`} dangerouslySetInnerHTML=${{ __html: md(m.text) }} />` : null}
@@ -330,7 +353,7 @@ function RunBlock({ m }) {
   const shown = live ? r.steps.slice(-8) : r.steps;
   return html`<div class=${`run ${live ? "live" : ""} ${r.status === "waiting" ? "waiting" : ""}`}>
     <button class="run-head" onClick=${() => setOpen(!isOpen)}>
-      ${live && r.status !== "waiting" ? html`<span class="spinner" />` : html`<span class="state-dot" style=${r.status === "failed" ? "color:var(--danger)" : r.status === "waiting" ? "color:var(--warn)" : ""}><${stateIcon || I.okCircle} /></span>`}
+      ${live ? html`<${Blip} size=${32} state=${r.status === "waiting" ? "needs" : "working"} />` : html`<span class="state-dot" style=${r.status === "failed" ? "color:var(--danger)" : ""}><${stateIcon || I.okCircle} /></span>`}
       <span class="label"><b class=${live && r.status !== "waiting" ? "shimmer" : ""}>${title}</b><span>${sub}</span></span>
       ${live ? html`<span class="time">${dur(elapsed)}</span>` : null}
       <span class=${`chev ${isOpen ? "open" : ""}`}><${I.chevron} /></span>
@@ -402,7 +425,7 @@ function MessageList({ bot, messages, onImage, onTakeover }) {
   return html`<div class="messages" ref=${ref} onScroll=${onScroll}>
     <div class="messages-inner">
       ${messages === undefined ? html`<div class="empty">Loading…</div>` : null}
-      ${messages?.length === 0 ? html`<div class="hello" style="min-height:50vh"><${Avatar} bot=${bot} size=${52} /><h1>${bot.name}</h1><p>${bot.job}</p></div>` : null}
+      ${messages?.length === 0 ? html`<div class="hello" style="min-height:50vh"><${Blip} size=${104} /><h1>${bot.name}</h1><p>${bot.job}</p></div>` : null}
       ${(messages || []).map((m) =>
         m.kind === "run" ? html`<${RunBlock} key=${m.id} m=${m} />`
         : m.kind === "card" ? html`<${Card} key=${m.id} m=${m} onTakeover=${onTakeover} />`
@@ -724,7 +747,7 @@ function urlB64ToUint8Array(b64) {
 }
 async function enablePush(key) {
   if (!("serviceWorker" in navigator) || !("PushManager" in window)) throw new Error("On iPhone: first add this app to your Home Screen (Share → Add to Home Screen), then open it from there.");
-  if (!window.isSecureContext) throw new Error("Notifications need the secure https:// link (Tailscale). Run pilot.sh link on the Mac.");
+  if (!window.isSecureContext) throw new Error("Notifications need the secure https:// link (Tailscale). Run blip.sh link on the Mac.");
   const perm = await Notification.requestPermission();
   if (perm !== "granted") throw new Error("Notifications were not allowed");
   const reg = await navigator.serviceWorker.ready;
@@ -978,9 +1001,9 @@ function App() {
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [authed]);
-  if (authed === null) return html`<div class="boot"><${Mark} /></div>`;
+  if (authed === null) return html`<div class="boot"><${Blip} size=${48} state="working" /></div>`;
   if (!authed) return html`<${Login} onDone=${boot} />${s.toast ? html`<div class="toast">${s.toast}</div>` : null}`;
-  if (!s.state) return html`<div class="boot"><${Mark} /></div>`;
+  if (!s.state) return html`<div class="boot"><${Blip} size=${48} state="working" /></div>`;
   return html`<${Shell} />`;
 }
 

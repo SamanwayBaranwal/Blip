@@ -1,6 +1,6 @@
 {
-  "name": "Pilot",
-  "short_name": "Pilot",
+  "name": "Blip",
+  "short_name": "Blip",
   "description": "Your personal AI agents, running on your Mac.",
   "start_url": "/",
   "scope": "/",

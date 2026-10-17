@@ -1,8 +1,8 @@
 {
-  "name": "pilot",
+  "name": "blip",
   "version": "1.0.0",
   "private": true,
-  "description": "Pilot — your own always-on AI agents (Grok Bot / Dots style) running on your Mac, controlled from your phone.",
+  "description": "Blip — your own always-on AI agents (Grok Bot / Dots style) running on your Mac, controlled from your phone.",
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
