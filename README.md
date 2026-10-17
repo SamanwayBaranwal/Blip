@@ -2,7 +2,7 @@
 
 Your own always-on AI agents, running on your Mac and controlled from your phone, in the style of xAI's Grok Bot and ChatGPT's Dots.
 
-Meet **Blip**: a mouse pointer that came alive and does things on your computer for you. It's the app's mascot, and it shows what each bot is doing. It bobs while idle, clicks away while working, holds up a "!" when it needs you, and celebrates when a task is done.
+Meet **Blip**: a mouse pointer that came alive and does things on your computer for you. It's the app's mascot, and it shows what each bot is doing. It bobs while idle, clicks away while working, holds up a "!" when it needs you, and celebrates when a task is done. Every bot can dress its own Blip: body colors, hats (including a ₿ cap and a crown), glasses and shades, mustaches and beards, a ₿ chain or bow tie, and something to hold, like a Bitcoin coin or coffee.
 
 Every bot has the Mac as its computer: a terminal, files, a real Chrome browser, and control of Mac apps. You talk to your bots in the Blip app (installed on your phone's Home Screen) or, optionally, Telegram. Risky actions come to you as approval cards first.
 
@@ -46,15 +46,35 @@ cd ~/Blip
 
 # 4. Start Blip. It runs in the background and starts at every login.
 ./blip.sh install
+
+# 5. Install the Mac app (Dock icon, notifications, Dock badge)
+./blip.sh app
 ```
 
-`install` prints a link and a QR code. Scan the QR code on your phone (on the same Wi-Fi), then in Safari tap **Share → Add to Home Screen**.
+## Apps
+
+**Mac.** `./blip.sh app` builds a native `Blip.app` and puts it in Applications. It signs in by itself and adds:
+- Mac notifications when Blip needs you or replies
+- a Dock badge counting approvals waiting for you
+- a working mic and file picker
+- downloads saved to your Downloads folder
+
+Right-click its Dock icon → **Options → Keep in Dock**.
+
+**iPhone and Android (no App Store).** Blip installs from the browser as a Home Screen app:
+
+1. On the Mac, open Blip → **Settings → Connect your phone → Show code**.
+2. On your phone, open the link it shows: Safari on iPhone, Chrome on Android.
+3. iPhone: tap **Share → Add to Home Screen**. Android: tap **Install app**.
+4. Open Blip from the Home Screen and type the 6-digit code. It works once and expires after 10 minutes.
 
 ### Use it from anywhere, with notifications and the mic
 
+The home Wi-Fi link only works on the same network. Phones also only allow notifications and the mic over HTTPS.
+
 1. Install [Tailscale](https://tailscale.com/download) on the Mac and on your phone, and sign in to both with the same account.
-2. Run `./blip.sh remote`. You get a private HTTPS link and a QR code that only your own devices can open.
-3. In the app, go to **Settings → Notifications → Turn on**.
+2. Run `./blip.sh remote`. **Settings → Connect your phone** then shows the private `https://` link, which only your own devices can open.
+3. Add it to the Home Screen from that link. Then in Blip, go to **Settings → Notifications → Turn on**.
 
 ### macOS permissions
 
@@ -87,6 +107,7 @@ Keep the lid open: a MacBook sleeps when the lid is closed.
 | `./blip.sh logs` | Follow the log |
 | `./blip.sh link` | Show the app link and QR code again |
 | `./blip.sh remote` | Turn on the private Tailscale HTTPS link |
+| `./blip.sh app` | Build the Mac app and install it in Applications |
 
 ## Configuration (`.env`)
 
@@ -127,7 +148,8 @@ src/
   store.ts          saved state, spending, run history, audit log
   templates.ts      starter routines and bot templates
   voice.ts          Whisper speech-to-text and macOS speech for replies
-web/                the app: Preact + htm with no build step, Geist font, PWA (manifest + service worker)
+web/                the app: Preact + htm with no build step, Geist font, PWA (manifest + service worker), Blip mascot
+mac-app/            native Mac app (Swift + WebKit): notifications, Dock badge, menus; built by blip.sh app
 blip.sh            setup and background-service control (launchd)
 ```
 

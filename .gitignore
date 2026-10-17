@@ -6,3 +6,4 @@ logs/
 workspace/
 models/
 .DS_Store
+dist-mac/

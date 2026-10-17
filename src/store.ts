@@ -18,11 +18,15 @@ export type BotProfile = {
   job: string;
   style: string;
   model?: string; // per-bot model choice; falls back to MODEL in .env
+  look?: BlipLook; // how this bot's Blip is dressed (avatar customization)
   quiet?: boolean; // deliver this bot's messages silently (no sound)
   sessionId?: string;
   contextTokens?: number; // size of the current conversation, for the context meter
   createdAt: string;
 };
+
+/** Avatar customization. Values are accessory ids defined in web/app.js (LOOKS). */
+export type BlipLook = { color?: string; hat?: string; eyes?: string; face?: string; neck?: string; hold?: string };
 
 export type RunRecord = {
   at: string;

@@ -243,6 +243,7 @@ export function createBotFromTemplate(key: string) {
   const t = BOT_TEMPLATES[key];
   if (!t) throw new Error("Unknown template");
   const nb = createBot(findBot(t.name) ? `${t.name} ${state.bots.length + 1}` : t.name, t.job, t.style);
+  if (t.look) nb.look = { ...t.look };
   post(nb.id, `Hi! I'm ${nb.name}. ${nb.job}\n\nTell me a bit about what you need and I'll get going.`, { push: false });
   stateChanged();
   return nb;

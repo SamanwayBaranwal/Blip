@@ -20,6 +20,16 @@ async function api(path, { method = "GET", body } = {}) {
   return data;
 }
 
+// ============================================================ native Mac app bridge
+// Blip.app (mac-app/) injects window.webkit.messageHandlers.blip*; in a browser these are no-ops.
+const nativeBridge = window.webkit?.messageHandlers;
+function nativeNotify(title, body) {
+  try { nativeBridge?.blipNotify?.postMessage({ title, body: String(body || "").slice(0, 240) }); } catch {}
+}
+function nativeBadge(count) {
+  try { nativeBridge?.blipBadge?.postMessage(count ? String(count) : ""); } catch {}
+}
+
 // ============================================================ store
 const store = { state: null, threads: {}, unread: {}, toast: null, listeners: new Set() };
 const emit = () => store.listeners.forEach((l) => l());
@@ -46,6 +56,7 @@ const fail = (e) => toast(e?.message || String(e));
 
 async function loadState() {
   store.state = await api("/state");
+  nativeBadge(store.state.runtime?.pendingCards);
   emit();
 }
 let stateTimer;
@@ -70,6 +81,11 @@ function upsert(m, live) {
   const isNew = !list || !list.some((x) => x.id === m.id);
   if (live && isNew && m.role !== "user" && m.botId !== selectedBot()) {
     store.unread = { ...store.unread, [m.botId]: (store.unread[m.botId] || 0) + 1 };
+  }
+  if (live && isNew && m.role !== "user" && (m.kind === "text" || m.kind === "card")) {
+    const name = store.state?.bots.find((b) => b.id === m.botId)?.name || "Blip";
+    if (m.kind === "card") nativeNotify(m.card.type === "suggestion" ? `${name} has a suggestion` : `${name} needs you`, m.card.title);
+    else if (m.role === "bot" && m.text) nativeNotify(name, m.text);
   }
   if (live && isNew && m.role === "bot" && m.kind === "text" && m.meta?.voice && m.text && "speechSynthesis" in window) {
     speechSynthesis.speak(new SpeechSynthesisUtterance(m.text.replace(/[•*_#`]/g, "").slice(0, 1500)));
@@ -164,10 +180,85 @@ const I = {
   dash: () => svg(html`<circle cx="12" cy="12" r="9" /><path d="M8.5 12h7" />`),
 };
 // Blip, the mascot: a mouse pointer that came alive. Its state (idle, working, needs, done, sleep) is CSS-driven.
-const BLIP_SVG = `<svg viewBox="0 0 200 200" aria-hidden="true">
+// Every bot can dress its Blip differently: body color, hat, eyewear, facial hair, neckwear and something to hold.
+const OUT = 'stroke="#56565e" stroke-width="2"';
+const BTC = (x, y, size) => `<text x="${x}" y="${y}" font-size="${size}" font-weight="800" text-anchor="middle" fill="#fff" font-family="Arial, Helvetica, sans-serif">₿</text>`;
+const LOOKS = {
+  color: [
+    { id: "classic", label: "Classic" },
+    { id: "gold", label: "Gold", body: "#f6d77a" },
+    { id: "mint", label: "Mint", body: "#a7ecd0" },
+    { id: "sky", label: "Sky", body: "#a9d4ff" },
+    { id: "pink", label: "Pink", body: "#ffbdd0" },
+    { id: "lilac", label: "Lilac", body: "#d2c2ff" },
+    { id: "peach", label: "Peach", body: "#ffc9a3" },
+  ],
+  hat: [
+    { id: "none", label: "None" },
+    { id: "tophat", label: "Top hat", top: 2, svg: `<rect x="50" y="2" width="30" height="26" rx="3" fill="#1b1b1f" ${OUT}/><rect x="50" y="20" width="30" height="5" fill="#e5484d"/><ellipse cx="65" cy="30" rx="23" ry="5" fill="#1b1b1f" ${OUT}/>` },
+    { id: "cap", label: "₿ cap", top: 10, svg: `<path d="M48 31 Q49 10 67 10 Q84 10 86 29 Z" fill="#1b1b1f" ${OUT}/><path d="M80 29 Q99 26 108 33 Q94 37 80 34 Z" fill="#1b1b1f" ${OUT}/><circle cx="66" cy="21" r="6.5" fill="#f7931a"/>${BTC(66, 24.6, 9.5)}` },
+    { id: "beanie", label: "Beanie", top: -2, svg: `<path d="M47 30 Q47 6 66 6 Q85 6 85 30 Z" fill="#e5484d"/><rect x="45" y="24" width="42" height="9" rx="4.5" fill="#b9343a"/><circle cx="66" cy="4" r="6" fill="#f4f4f6"/>` },
+    { id: "party", label: "Party", top: -16, svg: `<path d="M50 32 L66 -10 L82 32 Z" fill="#f2a93b"/><path d="M57 11 L75 11 M53 22 L79 22" stroke="#ff8aa0" stroke-width="5"/><circle cx="66" cy="-10" r="5" fill="#fff"/>` },
+    { id: "crown", label: "Crown", top: 3, svg: `<path d="M48 32 L49 10 L58 21 L66 4 L74 21 L83 10 L84 32 Z" fill="#f5c542" stroke="#c99a1e" stroke-width="2" stroke-linejoin="round"/><circle cx="66" cy="25" r="3.2" fill="#e5484d"/><circle cx="55" cy="27" r="2.2" fill="#3b82f6"/><circle cx="77" cy="27" r="2.2" fill="#3b82f6"/>` },
+    { id: "wizard", label: "Wizard", top: -28, svg: `<path d="M50 30 Q60 0 74 -26 Q76 2 84 30 Z" fill="#4f46e5"/><ellipse cx="66" cy="31" rx="26" ry="5" fill="#4338ca"/><path d="M66 6 l1.6 3.4 3.6.4 -2.7 2.4 .8 3.6 -3.3 -1.9 -3.3 1.9 .8 -3.6 -2.7 -2.4 3.6 -.4z" fill="#f5c542"/><circle cx="72" cy="-6" r="1.6" fill="#f5c542"/><circle cx="61" cy="19" r="1.4" fill="#f5c542"/>` },
+    { id: "cowboy", label: "Cowboy", top: 4, svg: `<path d="M54 26 Q54 6 66 8 Q78 6 78 26 Z" fill="#8b5a2b"/><path d="M38 26 Q66 38 94 26 Q90 34 66 34 Q42 34 38 26 Z" fill="#a0692f"/><rect x="54" y="21" width="24" height="4" fill="#5c3a1a"/>` },
+    { id: "chef", label: "Chef", top: -6, svg: `<circle cx="56" cy="12" r="9" fill="#fff" stroke="#c8c8ce" stroke-width="2"/><circle cx="76" cy="12" r="9" fill="#fff" stroke="#c8c8ce" stroke-width="2"/><circle cx="66" cy="6" r="11" fill="#fff" stroke="#c8c8ce" stroke-width="2"/><rect x="52" y="14" width="28" height="17" rx="2" fill="#fff"/><rect x="52" y="18" width="28" height="13" rx="2" fill="none" stroke="#c8c8ce" stroke-width="2"/>` },
+    { id: "headphones", label: "Headphones", top: 2, svg: `<path d="M50 50 Q50 6 70 6 Q92 6 90 46" fill="none" stroke="#2b2b31" stroke-width="6" stroke-linecap="round"/><rect x="44" y="40" width="12" height="20" rx="5" fill="#ff8aa0"/><rect x="84" y="36" width="12" height="20" rx="5" fill="#ff8aa0" transform="rotate(-40 90 46)"/>` },
+    { id: "halo", label: "Halo", top: 2, svg: `<ellipse cx="66" cy="10" rx="19" ry="5" fill="none" stroke="#f5c542" stroke-width="4"/>` },
+    { id: "propeller", label: "Propeller", top: -4, svg: `<path d="M48 30 Q48 10 66 10 Q84 10 84 30 Z" fill="#3b82f6"/><path d="M48 30 Q48 10 66 10 L66 30 Z" fill="#f2a93b"/><rect x="65" y="1" width="2" height="10" fill="#56565e"/><ellipse cx="57" cy="1" rx="9" ry="2.6" fill="#e5484d"/><ellipse cx="75" cy="1" rx="9" ry="2.6" fill="#22c55e"/>` },
+  ],
+  eyes: [
+    { id: "none", label: "None" },
+    { id: "glasses", label: "Glasses", svg: `<g fill="rgba(255,255,255,0.18)" stroke="#1b1b1f" stroke-width="2.6"><circle cx="84.5" cy="98" r="10"/><circle cx="109.5" cy="98" r="10"/></g><path d="M94.5 97 Q97 94.5 99.5 97" stroke="#1b1b1f" stroke-width="2.6" fill="none"/>` },
+    { id: "shades", label: "Shades", svg: `<g fill="#0b0b0c"><rect x="72" y="90" width="24" height="15" rx="6"/><rect x="98" y="90" width="24" height="15" rx="6"/></g><path d="M95 95 L99 95" stroke="#0b0b0c" stroke-width="3"/><path d="M76 94 l5 0 M102 94 l5 0" stroke="rgba(255,255,255,0.55)" stroke-width="2" stroke-linecap="round"/>` },
+    { id: "nerd", label: "Nerd", svg: `<g fill="none" stroke="#1b1b1f" stroke-width="4"><rect x="73" y="89" width="23" height="18" rx="3"/><rect x="98" y="89" width="23" height="18" rx="3"/></g><path d="M96 96 L98 96" stroke="#1b1b1f" stroke-width="4"/>` },
+    { id: "monocle", label: "Monocle", svg: `<circle cx="109.5" cy="98" r="10" fill="rgba(255,255,255,0.15)" stroke="#c99a1e" stroke-width="2.6"/><path d="M118 104 Q124 116 120 128" stroke="#c99a1e" stroke-width="1.6" fill="none"/>` },
+    { id: "hearts", label: "Heart eyes", svg: `<g fill="#e5484d"><path d="M84.5 107 C73 99 74 88 80 88.5 C83 88.5 84.5 92 84.5 92 C84.5 92 86 88.5 89 88.5 C95 88 96 99 84.5 107Z"/><path d="M109.5 107 C98 99 99 88 105 88.5 C108 88.5 109.5 92 109.5 92 C109.5 92 111 88.5 114 88.5 C120 88 121 99 109.5 107Z"/></g>` },
+  ],
+  face: [
+    { id: "none", label: "None" },
+    { id: "mustache", label: "Handlebar", over: `<path d="M97 108 C92 103.5 84 103.5 80.5 109 C79 112.5 75 112.5 74.5 109.5 C76 116 86 117 97 112 C108 117 118 116 119.5 109.5 C119 112.5 115 112.5 113.5 109 C110 103.5 102 103.5 97 108 Z" fill="#3a2a1e"/>` },
+    { id: "chevron", label: "Chevron", over: `<path d="M83 110 Q97 99 111 110 Q104 114 97 110.5 Q90 114 83 110Z" fill="#3a2a1e"/>` },
+    { id: "beard", label: "Beard", under: `<path d="M75 106 Q76 137 97 141 Q118 137 119 106 Q112 121 97 122 Q82 121 75 106Z" fill="#3a2a1e"/>`, over: `<path d="M86 110 Q97 103 108 110 Q102 113 97 111 Q92 113 86 110Z" fill="#3a2a1e"/>` },
+    { id: "goatee", label: "Goatee", under: `<path d="M91 120 Q97 135 103 120 Q97 123.5 91 120Z" fill="#3a2a1e"/>` },
+    { id: "freckles", label: "Freckles", over: `<g fill="#c58b6a"><circle cx="70" cy="104" r="1.3"/><circle cx="74" cy="102" r="1.3"/><circle cx="73" cy="106" r="1.3"/><circle cx="120" cy="104" r="1.3"/><circle cx="124" cy="102" r="1.3"/><circle cx="123" cy="106" r="1.3"/></g>` },
+  ],
+  neck: [
+    { id: "none", label: "None" },
+    { id: "bowtie", label: "Bow tie", svg: `<path d="M97 126 L84 119 L84 133 Z M97 126 L110 119 L110 133 Z" fill="#e5484d"/><circle cx="97" cy="126" r="3.4" fill="#b9343a"/>` },
+    { id: "tie", label: "Tie", svg: `<path d="M93 121 L101 121 L99 127 L95 127Z" fill="#3b82f6"/><path d="M95 127 L99 127 L103 150 L97 156 L92 150Z" fill="#3b82f6"/>` },
+    { id: "btc-chain", label: "₿ chain", svg: `<path d="M74 114 Q97 132 120 114" fill="none" stroke="#f5c542" stroke-width="2.4" stroke-dasharray="3 2"/><circle cx="97" cy="131" r="8.5" fill="#f7931a" stroke="#c97a12" stroke-width="1.6"/>${BTC(97, 135, 11)}` },
+    { id: "gold-chain", label: "Gold chain", svg: `<path d="M74 114 Q97 134 120 114" fill="none" stroke="#f5c542" stroke-width="3.2" stroke-linecap="round" stroke-dasharray="4 2.5"/>` },
+    { id: "scarf", label: "Scarf", svg: `<path d="M72 116 Q97 128 122 116 L122 124 Q97 136 72 124Z" fill="#e5484d"/><path d="M108 126 L114 146 L106 147 L102 128Z" fill="#b9343a"/>` },
+  ],
+  hold: [
+    { id: "none", label: "None" },
+    { id: "coin", label: "Bitcoin", svg: `<circle cx="150" cy="140" r="15" fill="#f7931a" stroke="#c97a12" stroke-width="2"/>${BTC(150, 146.5, 18)}` },
+    { id: "coffee", label: "Coffee", svg: `<rect x="138" y="132" width="20" height="22" rx="4" fill="#f4f4f6" stroke="#c8c8ce" stroke-width="2"/><path d="M158 137 Q166 139 158 147" fill="none" stroke="#c8c8ce" stroke-width="3"/><rect x="139" y="133" width="18" height="5" fill="#8b5a2b"/><path d="M144 126 q-3 -4 0 -8 M152 126 q-3 -4 0 -8" stroke="#8f8f97" stroke-width="2" fill="none" stroke-linecap="round"/>` },
+    { id: "phone", label: "Phone", svg: `<rect x="140" y="124" width="20" height="34" rx="4" fill="#1b1b1f" ${OUT}/><rect x="143" y="129" width="14" height="22" rx="1.5" fill="#3b82f6"/>` },
+    { id: "flower", label: "Flower", svg: `<path d="M150 160 Q148 146 150 134" stroke="#22c55e" stroke-width="3" fill="none"/><g fill="#ff8aa0"><circle cx="150" cy="124" r="5"/><circle cx="157" cy="129" r="5"/><circle cx="154" cy="137" r="5"/><circle cx="146" cy="137" r="5"/><circle cx="143" cy="129" r="5"/></g><circle cx="150" cy="131" r="4" fill="#f5c542"/>` },
+    { id: "balloon", label: "Balloon", svg: `<path d="M150 170 Q146 150 152 136" stroke="#8f8f97" stroke-width="1.5" fill="none"/><ellipse cx="154" cy="120" rx="13" ry="16" fill="#e5484d"/><path d="M152 136 l4 0 -2 -3z" fill="#b9343a"/>` },
+    { id: "wand", label: "Magic wand", svg: `<path d="M136 160 L156 128" stroke="#2b2b31" stroke-width="4" stroke-linecap="round"/><path d="M158 112 l3 7 7 1 -5 5 1.5 7 -6.5 -3.5 -6.5 3.5 1.5 -7 -5 -5 7 -1z" fill="#f5c542"/>` },
+  ],
+};
+const LOOK_PARTS = ["color", "hat", "eyes", "face", "neck", "hold"];
+const pick = (part, id) => LOOKS[part].find((o) => o.id === id) || LOOKS[part][0];
+
+const svgCache = new Map();
+function blipSvg(look = {}, tight = false) {
+  const key = JSON.stringify([look, tight]);
+  if (svgCache.has(key)) return svgCache.get(key);
+  const hat = pick("hat", look.hat), eyes = pick("eyes", look.eyes), face = pick("face", look.face);
+  const neck = pick("neck", look.neck), hold = pick("hold", look.hold);
+  // "tight" crops to the character (avatars, logo) so the face reads at small sizes; tall hats widen the crop.
+  const top = Math.min(26, (hat.top ?? 26) + 1);
+  const sz = 182 - top;
+  const viewBox = tight ? `${110 - sz / 2} ${top} ${sz} ${sz}` : "0 0 200 200";
+  const out = `<svg viewBox="${viewBox}" aria-hidden="true">
   <g class="fx-work"><circle class="fx-ring ripple" cx="62" cy="36" r="14"/><circle class="fx-ring ripple" cx="62" cy="36" r="14"/></g>
   <g class="g-body">
     <path class="bd" d="M62 34 L62 158 L94 128 L114 172 L136 162 L116 120 L158 120 Z" stroke-width="18" stroke-linejoin="round"/>
+    ${face.under || ""}${neck.svg || ""}
     <g class="eyes-open"><ellipse class="ink eo" cx="84.5" cy="98" rx="5.6" ry="7.4"/><ellipse class="ink eo" cx="109.5" cy="98" rx="5.6" ry="7.4"/>
       <circle class="hl eo" cx="86.5" cy="95" r="1.8"/><circle class="hl eo" cx="111.5" cy="95" r="1.8"/></g>
     <path class="inks eh" d="M78.9 100 Q84.5 90.6 90.1 100 M103.9 100 Q109.5 90.6 115.1 100"/>
@@ -176,15 +267,19 @@ const BLIP_SVG = `<svg viewBox="0 0 200 200" aria-hidden="true">
     <path class="inks mo-smile" d="M92 112 Q97 117 102 112"/>
     <ellipse class="ink mo-o" cx="97" cy="114" rx="3.6" ry="4.4"/>
     <path class="ink mo-big" d="M89 111 Q97 123 105 111 Z"/>
+    ${face.over || ""}${eyes.svg || ""}${hat.svg ? `<g transform="translate(-1 5)">${hat.svg}</g>` : ""}${hold.svg || ""}
   </g>
   <g class="bang"><rect x="132" y="60" width="26" height="30" rx="9"/><path d="M142.5 66 h5 l-1 12 h-3 z M145 81 a2.6 2.6 0 1 0 0.01 0z"/></g>
   <g class="spark-g"><path class="spark" d="M150 40 l3 -9 3 9 9 3 -9 3 -3 9 -3 -9 -9 -3z"/><path class="spark" d="M30 70 l2.4 -7 2.4 7 7 2.4 -7 2.4 -2.4 7 -2.4 -7 -7 -2.4z"/><path class="spark" d="M166 150 l2 -6 2 6 6 2 -6 2 -2 6 -2 -6 -6 -2z"/></g>
   <g class="zz-g"><text class="zz" x="140" y="58">z</text><text class="zz" x="152" y="44" style="font-size:16px">z</text></g>
 </svg>`;
-// "tight" crops to the character itself (for avatars and the logo) so the face reads at small sizes.
-const BLIP_TIGHT = BLIP_SVG.replace('viewBox="0 0 200 200"', 'viewBox="34 26 152 152"');
-function Blip({ size, state = "idle", still = false, tight = false }) {
-  return html`<div class=${`m ${still ? "still" : ""}`} data-state=${state} style=${size ? `width:${size}px` : ""} dangerouslySetInnerHTML=${{ __html: tight ? BLIP_TIGHT : BLIP_SVG }} />`;
+  svgCache.set(key, out);
+  return out;
+}
+function Blip({ size, state = "idle", still = false, tight = false, look }) {
+  const tint = look?.color ? pick("color", look.color).body : null;
+  const style = `${size ? `width:${size}px;` : ""}${tint ? `--m-body:${tint};--m-ink:#0b0b0c;` : ""}`;
+  return html`<div class=${`m ${still ? "still" : ""}`} data-state=${state} style=${style} dangerouslySetInnerHTML=${{ __html: blipSvg(look, tight) }} />`;
 }
 const Mark = () => html`<${Blip} size=${26} still tight />`;
 
@@ -192,7 +287,7 @@ const Mark = () => html`<${Blip} size=${26} still tight />`;
 function Avatar({ bot, size = 34, status, still }) {
   const mood = status === "live" ? "working" : status === "wait" ? "needs" : "idle";
   return html`<div class="avatar" title=${bot?.name} style=${`width:${size}px;height:${size}px`}>
-    <${Blip} state=${mood} still=${still} tight />${status ? html`<span class=${`dot ${status}`} />` : null}
+    <${Blip} state=${mood} still=${still} tight look=${bot?.look} />${status ? html`<span class=${`dot ${status}`} />` : null}
   </div>`;
 }
 const Switch = ({ on, onChange }) => html`<button class=${`switch ${on ? "on" : ""}`} role="switch" aria-checked=${on} onClick=${() => onChange(!on)} />`;
@@ -245,8 +340,9 @@ function Login({ onDone }) {
   return html`<div class="login"><form class="login-box" onSubmit=${submit}>
     <div style="margin:0 auto"><${Blip} size=${84} /></div>
     <h1>Blip</h1>
-    <p>${failed ? "That link didn't work. " : ""}Enter your access code. Run <code>~/Blip/blip.sh link</code> on your Mac to see it, or scan its QR code.</p>
-    <input class="input" placeholder="Access code" value=${code} onInput=${(e) => setCode(e.target.value)} autocomplete="one-time-code" autofocus />
+    <p>${failed ? "That link didn't work. " : ""}On your Mac, open Blip and go to <b>Settings → Connect your phone</b>. Type the 6-digit code it shows.</p>
+    <input class="input" style="text-align:center;font-size:20px;letter-spacing:0.18em;height:52px" placeholder="000 000" value=${code} onInput=${(e) => setCode(e.target.value)} autocomplete="one-time-code" inputmode="text" autofocus />
+    <p class="hint">Or paste the access code from <code>~/Blip/blip.sh link</code>.</p>
     <button class="btn primary" disabled=${!code.trim() || busy}>${busy ? "Checking…" : "Open"}</button>
   </form></div>`;
 }
@@ -339,7 +435,7 @@ function TextMsg({ m, bot, onImage }) {
   </div>`;
 }
 
-function RunBlock({ m }) {
+function RunBlock({ m, bot }) {
   const r = m.run;
   const live = r.status === "running" || r.status === "waiting";
   const [open, setOpen] = useState(null);
@@ -353,7 +449,7 @@ function RunBlock({ m }) {
   const shown = live ? r.steps.slice(-8) : r.steps;
   return html`<div class=${`run ${live ? "live" : ""} ${r.status === "waiting" ? "waiting" : ""}`}>
     <button class="run-head" onClick=${() => setOpen(!isOpen)}>
-      ${live ? html`<${Blip} size=${32} state=${r.status === "waiting" ? "needs" : "working"} />` : html`<span class="state-dot" style=${r.status === "failed" ? "color:var(--danger)" : ""}><${stateIcon || I.okCircle} /></span>`}
+      ${live ? html`<${Blip} size=${32} look=${bot?.look} state=${r.status === "waiting" ? "needs" : "working"} />` : html`<span class="state-dot" style=${r.status === "failed" ? "color:var(--danger)" : ""}><${stateIcon || I.okCircle} /></span>`}
       <span class="label"><b class=${live && r.status !== "waiting" ? "shimmer" : ""}>${title}</b><span>${sub}</span></span>
       ${live ? html`<span class="time">${dur(elapsed)}</span>` : null}
       <span class=${`chev ${isOpen ? "open" : ""}`}><${I.chevron} /></span>
@@ -425,9 +521,9 @@ function MessageList({ bot, messages, onImage, onTakeover }) {
   return html`<div class="messages" ref=${ref} onScroll=${onScroll}>
     <div class="messages-inner">
       ${messages === undefined ? html`<div class="empty">Loading…</div>` : null}
-      ${messages?.length === 0 ? html`<div class="hello" style="min-height:50vh"><${Blip} size=${104} /><h1>${bot.name}</h1><p>${bot.job}</p></div>` : null}
+      ${messages?.length === 0 ? html`<div class="hello" style="min-height:50vh"><${Blip} size=${104} look=${bot.look} /><h1>${bot.name}</h1><p>${bot.job}</p></div>` : null}
       ${(messages || []).map((m) =>
-        m.kind === "run" ? html`<${RunBlock} key=${m.id} m=${m} />`
+        m.kind === "run" ? html`<${RunBlock} key=${m.id} m=${m} bot=${bot} />`
         : m.kind === "card" ? html`<${Card} key=${m.id} m=${m} onTakeover=${onTakeover} />`
         : html`<${TextMsg} key=${m.id} m=${m} bot=${bot} onImage=${onImage} />`,
       )}
@@ -755,6 +851,28 @@ async function enablePush(key) {
   await api("/push/subscribe", { method: "POST", body: sub.toJSON() });
 }
 
+function PairPhone() {
+  const [pair, setPair] = useState(null);
+  const now = useNow(!!pair, 1000);
+  const left = pair ? Math.max(0, Math.round((pair.expires - now) / 1000)) : 0;
+  const start = () => api("/pair", { method: "POST" }).then(setPair).catch(fail);
+  const copy = (t) => navigator.clipboard?.writeText(t).then(() => toast("Copied")).catch(() => toast(t));
+  const links = pair ? [...(pair.tailscale ? [pair.tailscale] : []), ...pair.lan] : [];
+  return html`<div class="section-title">Connect your phone</div>
+    ${!pair || left === 0
+      ? html`<div class="row" style="border:1px solid var(--line);border-radius:14px"><div class="grow"><b>Use Blip on your iPhone or Android</b><span>Install it on the Home Screen like an app. No App Store needed.</span></div><button class="btn small primary" onClick=${start}>Show code</button></div>`
+      : html`<div class="row" style="border:1px solid var(--line);border-radius:14px;display:grid;gap:12px">
+          <div style="display:flex;align-items:baseline;gap:12px"><b style="font:600 34px var(--mono);letter-spacing:0.12em">${pair.pin.slice(0, 3)} ${pair.pin.slice(3)}</b><span class="hint">expires in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}</span></div>
+          <ol class="hint" style="margin:0;padding-left:18px;display:grid;gap:4px">
+            <li>On your phone, open ${links.length ? html`<b style="color:var(--text)">${links[0]}</b>` : "this Mac's address"} in Safari (iPhone) or Chrome (Android).</li>
+            <li>iPhone: tap Share, then <b style="color:var(--text)">Add to Home Screen</b>. Android: tap <b style="color:var(--text)">Install app</b>.</li>
+            <li>Open Blip from the Home Screen and type this code.</li>
+          </ol>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">${links.map((l) => html`<button class="chip btn" onClick=${() => copy(l)}>Copy ${l.startsWith("https") ? "anywhere link" : "home Wi-Fi link"}</button>`)}</div>
+          ${pair.tailscale ? null : html`<p class="hint" style="margin:0">The home Wi-Fi link only works on the same network, without notifications or the mic. For anywhere access, install Tailscale on the Mac and phone, then run <code>~/Blip/blip.sh remote</code>.</p>`}
+        </div>`}`;
+}
+
 function SettingsSheet({ st, onClose }) {
   const [rules, reloadRules] = useLoad(() => api("/rules"), []);
   const [connectors, reloadConnectors] = useLoad(() => api("/connectors"), []);
@@ -806,6 +924,8 @@ function SettingsSheet({ st, onClose }) {
           <button class="icon-btn" onClick=${() => api(`/connectors/${c.name}`, { method: "DELETE" }).then(reloadConnectors).catch(fail)} aria-label="Remove"><${I.trash} /></button></div>`)}</div>`
       : html`<p class="hint">None yet — ask a bot “connect my Notion”. Most sites already work through the bot's browser once you sign in.</p>`}
 
+    <${PairPhone} />
+
     <div class="section-title">This device</div>
     <div class="toggle-row"><div class="grow"><b>Notifications</b><span>Get pinged for approvals, replies and routine results.</span></div>
       <button class="btn small" disabled=${pushOn} onClick=${() => enablePush(st.pushKey).then(() => { setPushOn(true); toast("Notifications on"); }).catch(fail)}>${pushOn ? "On" : "Turn on"}</button></div>
@@ -817,11 +937,11 @@ function SettingsSheet({ st, onClose }) {
 function NewBotSheet({ onClose, onCreated }) {
   const [tpl] = useLoad(() => api("/templates"), []);
   const [form, setForm] = useState({ name: "", job: "", style: "" });
-  const create = (body) => api("/bots", { method: "POST", body }).then(({ id }) => { onCreated(id); onClose(); }).catch(fail);
+  const create = (body) => api("/bots", { method: "POST", body }).then(({ id }) => { onClose(); onCreated(id, !body.template); }).catch(fail);
   const f = (k) => (e) => setForm({ ...form, [k]: e.target.value });
   return html`<${Sheet} title="New bot" onClose=${onClose}>
     <div class="section-title">Start from a template</div>
-    <div class="grid-cards">${tpl ? Object.entries(tpl.bots).map(([key, t]) => html`<button class="tpl" onClick=${() => create({ template: key })}><b>${t.label}</b><span>${t.job.slice(0, 90)}…</span></button>`) : null}</div>
+    <div class="grid-cards">${tpl ? Object.entries(tpl.bots).map(([key, t]) => html`<button class="tpl" onClick=${() => create({ template: key })}><${Blip} size=${48} still tight look=${t.look} /><b>${t.label}</b><span>${t.job.slice(0, 90)}…</span></button>`) : null}</div>
     <div class="section-title" style="margin-top:22px">Or make your own</div>
     <div style="display:flex;gap:10px">
       <div class="field" style="flex:1"><label>Name</label><input class="input" value=${form.name} onInput=${f("name")} placeholder="e.g. Max" /></div>
@@ -832,12 +952,74 @@ function NewBotSheet({ onClose, onCreated }) {
   <//>`;
 }
 
-function BotSheet({ bot, st, onClose }) {
+const PART_LABEL = { color: "Color", hat: "Hat", eyes: "Eyes", face: "Face", neck: "Neck", hold: "Holding" };
+const MOODS = [["idle", "Idle"], ["working", "Working"], ["needs", "Needs you"], ["done", "Done"], ["sleep", "Asleep"]];
+
+/** Customize a bot's Blip: every option is previewed on the bot's own Blip. */
+function StyleSheet({ bot, onClose }) {
+  const [look, setLook] = useState({ ...(bot.look || {}) });
+  const [part, setPart] = useState("hat");
+  const [mood, setMood] = useState("idle");
+  const [busy, setBusy] = useState(false);
+  const withPart = (pt, id) => {
+    const next = { ...look };
+    if (id === "none" || id === "classic") delete next[pt];
+    else next[pt] = id;
+    return next;
+  };
+  const randomize = () => {
+    const next = {};
+    for (const pt of LOOK_PARTS) {
+      const opts = LOOKS[pt].slice(1);
+      if (Math.random() < (pt === "color" ? 0.45 : pt === "face" ? 0.35 : 0.55)) next[pt] = opts[Math.floor(Math.random() * opts.length)].id;
+    }
+    setLook(next);
+  };
+  const save = async () => {
+    setBusy(true);
+    try {
+      await api(`/bots/${bot.id}`, { method: "PATCH", body: { look } });
+      await loadState();
+      toast(`${bot.name} looks great`);
+      onClose();
+    } catch (e) {
+      fail(e);
+      setBusy(false);
+    }
+  };
+  return html`<${Sheet} title=${`Customize ${bot.name}`} onClose=${onClose}>
+    <div class="style-stage"><${Blip} size=${170} state=${mood} look=${look} /></div>
+    <div style="display:flex;justify-content:center;margin:-4px 0 18px"><${Seg} value=${mood} options=${MOODS} onChange=${setMood} /></div>
+    <div class="style-tabs">${LOOK_PARTS.map((pt) => html`<button class=${`tab ${pt === part ? "on" : ""}`} onClick=${() => setPart(pt)}>${PART_LABEL[pt]}</button>`)}</div>
+    <div class="style-grid">
+      ${LOOKS[part].map((o) => {
+        const chosen = (look[part] || (part === "color" ? "classic" : "none")) === o.id;
+        return html`<button class=${`style-tile ${chosen ? "on" : ""}`} onClick=${() => setLook(withPart(part, o.id))} aria-pressed=${chosen}>
+          <${Blip} size=${62} still tight look=${withPart(part, o.id)} />
+          <span>${o.label}</span>
+        </button>`;
+      })}
+    </div>
+    <div style="display:flex;gap:8px;margin-top:18px;flex-wrap:wrap">
+      <button class="btn" onClick=${randomize}>Randomize</button>
+      <button class="btn ghost" onClick=${() => setLook({})}>Reset</button>
+      <span style="flex:1" />
+      <button class="btn primary" disabled=${busy} onClick=${save}>${busy ? "Saving…" : "Save look"}</button>
+    </div>
+  <//>`;
+}
+
+function BotSheet({ bot, st, onClose, onStyle }) {
   const [form, setForm] = useState({ name: bot.name, job: bot.job, style: bot.style });
   const alias = st.models.find((m) => m.id === bot.model)?.alias || (bot.model === st.defaultModel ? "default" : bot.model);
   const patch = (body) => api(`/bots/${bot.id}`, { method: "PATCH", body }).then(loadState).catch(fail);
   const f = (k) => (e) => setForm({ ...form, [k]: e.target.value });
   return html`<${Sheet} title=${bot.name} onClose=${onClose}>
+    <div class="row" style="border:1px solid var(--line);border-radius:16px;margin-bottom:16px">
+      <${Blip} size=${64} look=${bot.look} />
+      <div class="grow"><b>${bot.name}'s Blip</b><span>Hats, glasses, mustaches, a ₿ chain and more.</span></div>
+      <button class="btn small primary" onClick=${onStyle}>Customize</button>
+    </div>
     <div style="display:flex;gap:10px">
       <div class="field" style="flex:1"><label>Name</label><input class="input" value=${form.name} onInput=${f("name")} /></div>
     </div>
@@ -889,6 +1071,31 @@ const STARTERS = [
   { label: "Research a topic", text: "Research this and send me a short PDF report: " },
 ];
 
+const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+let deferredInstall = null;
+window.addEventListener("beforeinstallprompt", (e) => {
+  e.preventDefault();
+  deferredInstall = e;
+  emit();
+});
+
+function InstallHint() {
+  const [hidden, setHidden] = useState(() => {
+    try { return localStorage.getItem("install-hint") === "hidden"; } catch { return false; }
+  });
+  if (standalone || hidden || nativeBridge?.blipNotify || (!isIOS && !deferredInstall)) return null;
+  const hide = () => {
+    setHidden(true);
+    try { localStorage.setItem("install-hint", "hidden"); } catch {}
+  };
+  return html`<div class="card" style="margin:6px 16px 0;padding:12px 14px;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;max-width:740px;align-self:center;width:calc(100% - 32px)">
+    <${Blip} size=${30} tight />
+    <div class="hint" style="color:var(--text-2)">${isIOS ? html`Install Blip: tap <b style="color:var(--text)">Share</b>, then <b style="color:var(--text)">Add to Home Screen</b>.` : "Install Blip as an app on this device."}</div>
+    <div style="display:flex;gap:6px">${!isIOS ? html`<button class="btn small primary" onClick=${() => deferredInstall?.prompt().then(hide)}>Install</button>` : null}<button class="btn small ghost" onClick=${hide}>Later</button></div>
+  </div>`;
+}
+
 function ChatView({ st, bot, onMenu, panel, setPanel, onSheet, onImage, setControl }) {
   const messages = store.threads[bot.id];
   const s = botStatus(bot, st);
@@ -912,6 +1119,7 @@ function ChatView({ st, bot, onMenu, panel, setPanel, onSheet, onImage, setContr
       <button class=${`icon-btn ${panel === "memory" ? "on" : ""}`} onClick=${() => togglePanel("memory")} aria-label="Memory" title="Memory"><${I.brain} /></button>
       <button class="icon-btn" onClick=${() => onSheet({ type: "bot" })} aria-label="Bot settings" title="Bot settings"><${I.more} /></button>
     </header>
+    <${InstallHint} />
     <${MessageList} bot=${bot} messages=${messages} onImage=${onImage} onTakeover=${() => { setPanel("computer"); setControl(true); }} />
     ${fresh ? html`<div class="starters">${STARTERS.map((x) => html`<button class="starter" onClick=${() => starter(x)}>${x.label}</button>`)}</div>` : null}
     <${Composer} key=${bot.id} bot=${bot} st=${st} onModel=${() => onSheet({ type: "bot" })} preset=${preset} clearPreset=${() => setPreset(null)} />
@@ -965,8 +1173,9 @@ function Shell() {
     ${sheet?.type === "skills" ? html`<${SkillsSheet} botId=${bot.id} onClose=${() => setSheet(null)} />` : null}
     ${sheet?.type === "activity" ? html`<${ActivitySheet} onClose=${() => setSheet(null)} />` : null}
     ${sheet?.type === "settings" ? html`<${SettingsSheet} st=${st} onClose=${() => setSheet(null)} />` : null}
-    ${sheet?.type === "newbot" ? html`<${NewBotSheet} onClose=${() => setSheet(null)} onCreated=${(id) => loadState().then(() => select(id))} />` : null}
-    ${sheet?.type === "bot" ? html`<${BotSheet} bot=${bot} st=${st} onClose=${() => setSheet(null)} />` : null}
+    ${sheet?.type === "newbot" ? html`<${NewBotSheet} onClose=${() => setSheet(null)} onCreated=${(id, custom) => loadState().then(() => { select(id); if (custom) setSheet({ type: "style" }); })} />` : null}
+    ${sheet?.type === "bot" ? html`<${BotSheet} bot=${bot} st=${st} onClose=${() => setSheet(null)} onStyle=${() => setSheet({ type: "style" })} />` : null}
+    ${sheet?.type === "style" ? html`<${StyleSheet} bot=${bot} onClose=${() => setSheet(null)} />` : null}
     ${lightbox ? html`<div class="lightbox" onClick=${() => setLightbox(null)}><img src=${lightbox} alt="" /></div>` : null}
     ${s.toast ? html`<div class="toast">${s.toast}</div>` : null}
   </div>`;

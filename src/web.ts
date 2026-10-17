@@ -1,5 +1,7 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import express, { type NextFunction, type Request, type Response } from "express";
 import { MODEL_ALIASES } from "./agent.js";
@@ -44,6 +46,46 @@ function setSession(req: Request, res: Response) {
   res.setHeader("Set-Cookie", `blip=${accessCode}; Path=/; HttpOnly; SameSite=Lax; Max-Age=31536000${secure}`);
 }
 
+// Phone pairing: a signed-in device shows a short 6-digit code that a new device types once.
+// It lasts 10 minutes and allows 8 tries, so the long access code never has to be typed on a phone.
+let pairing: { pin: string; expires: number; tries: number } | undefined;
+
+function newPairingPin() {
+  pairing = { pin: String(randomBytes(4).readUInt32BE(0) % 1_000_000).padStart(6, "0"), expires: Date.now() + 10 * 60_000, tries: 0 };
+  return pairing;
+}
+
+function pinMatches(given: unknown) {
+  if (!pairing || Date.now() > pairing.expires) return false;
+  if (++pairing.tries > 8) {
+    pairing = undefined;
+    return false;
+  }
+  const ok = String(given ?? "").replace(/\D/g, "") === pairing.pin;
+  if (ok) pairing = undefined; // single use
+  return ok;
+}
+
+/** Addresses a phone can use to reach this Mac: home Wi-Fi, and Tailscale's private HTTPS link if it's on. */
+function phoneUrls(): { lan: string[]; tailscale?: string } {
+  const lan = Object.values(os.networkInterfaces())
+    .flat()
+    .filter((i): i is os.NetworkInterfaceInfo => !!i && i.family === "IPv4" && !i.internal && !i.address.startsWith("100."))
+    .map((i) => `http://${i.address}:${config.webPort}`);
+  let tailscale: string | undefined;
+  for (const bin of ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"]) {
+    if (!fs.existsSync(bin)) continue;
+    try {
+      const out = execFileSync(bin, ["serve", "status"], { encoding: "utf8", timeout: 3000 });
+      tailscale = /https:\/\/[^\s/]+/.exec(out)?.[0];
+    } catch {
+      // Tailscale installed but not serving yet
+    }
+    break;
+  }
+  return { lan, tailscale };
+}
+
 function auth(req: Request, res: Response, next: NextFunction) {
   if (matches(cookieOf(req))) return next();
   res.status(401).json({ error: "login required" });
@@ -62,7 +104,7 @@ function appState() {
   const rt = runtime();
   return {
     bots: state.bots.map((b) => ({
-      id: b.id, name: b.name, emoji: b.emoji, job: b.job, style: b.style, quiet: !!b.quiet,
+      id: b.id, name: b.name, emoji: b.emoji, job: b.job, style: b.style, quiet: !!b.quiet, look: b.look ?? {},
       model: b.model ?? config.model, contextTokens: b.contextTokens ?? 0, spentToday: byBot[b.name] ?? 0,
       running: rt.current?.botId === b.id, queued: rt.queued.filter((q) => q.botId === b.id).length,
     })),
@@ -133,13 +175,18 @@ export function startWeb() {
   app.use(express.static(config.webDir, { index: "index.html", maxAge: 0 }));
 
   app.post("/api/login", (req, res) => {
-    if (!matches(req.body?.code)) return void res.status(401).json({ error: "wrong code" });
+    if (!matches(req.body?.code) && !pinMatches(req.body?.code)) return void res.status(401).json({ error: "wrong code" });
     setSession(req, res);
     res.json({ ok: true });
   });
 
   const api = express.Router();
   api.use(auth);
+
+  api.post("/pair", (_req, res) => {
+    const p = newPairingPin();
+    res.json({ pin: p.pin, expires: p.expires, ...phoneUrls() });
+  });
 
   api.get("/state", (_req, res) => void res.json(appState()));
   // Connect Claude from the app: checks the key with a tiny request, then saves it to .env.
@@ -201,6 +248,7 @@ export function startWeb() {
   api.post("/bots", (req, res) => {
     try {
       const b = req.body.template ? createBotFromTemplate(str(req.body.template)) : createBot(str(req.body.name, 32), str(req.body.job, 500), str(req.body.style, 300) || undefined);
+      if (!req.body.template && req.body.look && typeof req.body.look === "object") b.look = req.body.look;
       if (req.body.emoji) b.emoji = str(req.body.emoji, 8);
       save();
       stateChanged();
@@ -218,6 +266,14 @@ export function startWeb() {
     if (req.body.emoji) b.emoji = str(req.body.emoji, 8);
     if (req.body.model !== undefined) b.model = req.body.model ? MODEL_ALIASES[str(req.body.model)] ?? str(req.body.model, 60) : undefined;
     if (req.body.quiet !== undefined) b.quiet = !!req.body.quiet;
+    if (req.body.look && typeof req.body.look === "object") {
+      const look: Record<string, string> = {};
+      for (const key of ["color", "hat", "eyes", "face", "neck", "hold"]) {
+        const v = req.body.look[key];
+        if (typeof v === "string" && /^[a-z0-9-]{1,24}$/.test(v) && v !== "none" && v !== "classic") look[key] = v;
+      }
+      b.look = look;
+    }
     if (req.body.active) state.activeBotId = b.id;
     if (req.body.primary) state.primaryBotId = b.id;
     save();

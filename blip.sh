@@ -8,6 +8,7 @@
 #   ./blip.sh status     is it running?
 #   ./blip.sh link       show the app link + QR code to open on your phone
 #   ./blip.sh remote     make the app reachable from anywhere over Tailscale (private HTTPS)
+#   ./blip.sh app        build the Blip Mac app and put it in Applications
 set -e
 cd "${0:A:h}"
 DIR="$PWD"
@@ -131,6 +132,25 @@ case "$1" in
   link)
     show_link
     ;;
+  app)
+    if ! command -v swiftc >/dev/null; then
+      echo "Install Apple's command line tools first (one time): xcode-select --install"
+      exit 1
+    fi
+    B="$DIR/dist-mac/Blip.app"
+    rm -rf "$DIR/dist-mac" && mkdir -p "$B/Contents/MacOS" "$B/Contents/Resources"
+    echo "▸ Building Blip.app…"
+    swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos13" mac-app/main.swift -o "$B/Contents/MacOS/Blip" \
+      -framework Cocoa -framework WebKit -framework UserNotifications
+    sed "s#__BLIP_HOME__#$DIR#" mac-app/Info.plist > "$B/Contents/Info.plist"
+    cp mac-app/Blip.icns "$B/Contents/Resources/Blip.icns"
+    codesign --force --deep --sign - "$B" >/dev/null
+    DEST="/Applications"; [[ -w "$DEST" ]] || { DEST="$HOME/Applications"; mkdir -p "$DEST"; }
+    osascript -e 'quit app "Blip"' >/dev/null 2>&1 || true
+    rm -rf "$DEST/Blip.app" && ditto "$B" "$DEST/Blip.app"
+    echo "✅ Installed $DEST/Blip.app — opening it. Right-click its Dock icon → Options → Keep in Dock."
+    open "$DEST/Blip.app"
+    ;;
   remote)
     if [[ ! -x "$TS" ]]; then
       echo "Install Tailscale first (free): https://tailscale.com/download/mac — sign in, and install it on your phone with the same account."
@@ -141,6 +161,6 @@ case "$1" in
     show_link
     ;;
   *)
-    echo "Usage: ./blip.sh install | restart | stop | logs | status | link | remote"
+    echo "Usage: ./blip.sh setup | install | restart | stop | logs | status | link | remote | app"
     ;;
 esac

@@ -26,9 +26,17 @@ The UI is a PWA served by `src/web.ts`. Telegram is an optional mirror channel.
   - `done`: happy eyes and sparkles
   - `sleep`: zz
 - Avatars mirror each bot's live state. In light mode the character inverts to black.
+- **Customization:** every bot has its own `look`, stored on `BotProfile.look` (`color`, `hat`, `eyes`, `face`, `neck`, `hold`). The wardrobe is defined in `LOOKS` in `web/app.js` as SVG layers in Blip's 200×200 space. Hats anchor near the tip at about (66, 30), the face sits at eyes (84.5|109.5, 98) and mouth (97, 112), and held items sit at about (150, 140).
+- The customize screen is `StyleSheet`, reached from Bot settings → Customize. Template bots come pre-styled through `templates.ts`. The server whitelists look keys in `PATCH /api/bots/:id`.
 - The app icon is `web/icon.svg`, rendered to `icon-512.png` with `qlmanage`.
 - Use the mascot, never emoji. The original concept page is the "Pilot Mascot Lab" artifact.
 - **The rename.** The project used to be called Pilot. Everything was renamed: `blip.sh`, the `com.blip.agent` service, the in-process MCP server `blip` (so tools are `mcp__blip__*`), and the `blip` cookie. The install moved from `~/PilotBot` to `~/Blip`.
+
+## Apps
+
+- **Mac:** `mac-app/main.swift` is a native Swift and WKWebView app, built by `./blip.sh app`. It installs `/Applications/Blip.app`, ad-hoc signed, with the install path stored in Info.plist as `BlipHome`. It signs in with the local access code.
+- **Mac app bridge:** the web app calls `window.webkit.messageHandlers.blipNotify` and `blipBadge` (`nativeNotify` / `nativeBadge` in `app.js`).
+- **Phones:** iPhone and Android use the PWA with no App Store. Pairing is a 6-digit, single-use, 10-minute code from `POST /api/pair`, accepted by `/api/login`. It's shown in **Settings → Connect your phone**, which also lists the LAN and Tailscale links.
 
 ## About the user and how to work with them
 
