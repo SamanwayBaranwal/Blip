@@ -1,0 +1,146 @@
+#!/bin/zsh
+# Pilot control script.
+#   ./pilot.sh setup      first time on a new Mac: installs everything Pilot needs
+#   ./pilot.sh install    build + start now + start automatically at every login
+#   ./pilot.sh restart    rebuild and restart (after editing .env or code)
+#   ./pilot.sh stop       stop until next install
+#   ./pilot.sh logs       follow the log
+#   ./pilot.sh status     is it running?
+#   ./pilot.sh link       show the app link + QR code to open on your phone
+#   ./pilot.sh remote     make the app reachable from anywhere over Tailscale (private HTTPS)
+set -e
+cd "${0:A:h}"
+DIR="$PWD"
+LABEL="com.pilotbot.agent"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+NODE="$(command -v node)"
+DOMAIN="gui/$(id -u)"
+PORT="$(grep -E '^WEB_PORT=' .env 2>/dev/null | cut -d= -f2)"; PORT="${PORT:-8787}"
+TS="$(command -v tailscale || echo /Applications/Tailscale.app/Contents/MacOS/Tailscale)"
+
+# macOS blocks background apps from reading Desktop, Documents and Downloads, so the service can't run from there.
+check_location() {
+  case "$DIR" in
+    "$HOME/Desktop"*|"$HOME/Documents"*|"$HOME/Downloads"*)
+      echo "❌ Pilot is in $DIR."
+      echo "   macOS blocks background apps from Desktop, Documents and Downloads."
+      echo "   Move it to your home folder, then run it from there:"
+      echo "     mv \"$DIR\" ~/PilotBot && cd ~/PilotBot && ./pilot.sh setup"
+      exit 1 ;;
+  esac
+}
+
+check_env() {
+  [[ -f .env ]] || cp .env.example .env
+  chmod 600 .env
+}
+
+show_link() {
+  local code; code="$(cat data/app-access-code 2>/dev/null || true)"
+  if [[ -z "$code" ]]; then echo "Start the app first: ./pilot.sh install"; exit 1; fi
+  local url=""
+  if [[ -x "$TS" ]] && "$TS" serve status 2>/dev/null | grep -q "https://"; then
+    url="$("$TS" serve status 2>/dev/null | grep -oE 'https://[^ ]+' | head -1 | sed 's#/$##')"
+  fi
+  if [[ -z "$url" ]]; then
+    local ip; ip="$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || echo localhost)"
+    url="http://$ip:$PORT"
+    echo "ℹ️  Home Wi-Fi only. For anywhere-access, notifications and the mic, run: ./pilot.sh remote"
+  fi
+  echo ""
+  echo "📱 Open on your phone (scan or tap):  $url/login?code=$code"
+  "$NODE" -e 'require("qrcode-terminal").generate(process.argv[1], { small: true })' "$url/login?code=$code"
+  echo "Access code: $code"
+}
+
+write_plist() {
+  mkdir -p "$HOME/Library/LaunchAgents" logs
+  cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array><string>$NODE</string><string>$DIR/dist/main.js</string></array>
+  <key>WorkingDirectory</key><string>$DIR</string>
+  <key>EnvironmentVariables</key>
+  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>30</integer>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardOutPath</key><string>$DIR/logs/pilot.log</string>
+  <key>StandardErrorPath</key><string>$DIR/logs/pilot.log</string>
+</dict>
+</plist>
+EOF
+}
+
+case "$1" in
+  setup)
+    check_location
+    if ! command -v brew >/dev/null; then
+      echo "Install Homebrew first (one line, from https://brew.sh):"
+      echo '  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+      echo "Then open a new Terminal window and run ./pilot.sh setup again."
+      exit 1
+    fi
+    echo "▸ Installing tools (Node.js, click control, speech-to-text, audio)…"
+    for pkg in node cliclick whisper-cpp ffmpeg; do brew list "$pkg" >/dev/null 2>&1 || brew install "$pkg"; done
+    echo "▸ Installing app packages…"
+    npm ci --no-fund --no-audit
+    if [[ ! -f models/ggml-small.bin ]]; then
+      echo "▸ Downloading the speech model (~470 MB, one time)…"
+      mkdir -p models
+      curl -L --fail -o models/ggml-small.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.bin
+    fi
+    check_env
+    echo "▸ Building…"
+    npm run build --silent
+    echo ""
+    echo "✅ Setup done. Next:"
+    echo "   1. Sign in to Claude Code once on this Mac (Pilot uses that login until you add an API key)."
+    echo "   2. ./pilot.sh install"
+    ;;
+  install)
+    check_location
+    check_env
+    npm run build --silent
+    write_plist
+    launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+    launchctl bootstrap "$DOMAIN" "$PLIST"
+    echo "✅ Started. It runs in the background and starts at every login."
+    sleep 3; show_link
+    ;;
+  restart)
+    check_env
+    npm run build --silent
+    launchctl kickstart -k "$DOMAIN/$LABEL"
+    echo "🔄 Restarted."
+    ;;
+  stop)
+    launchctl bootout "$DOMAIN/$LABEL" && echo "⏹ Stopped. Run ./pilot.sh install to start again."
+    ;;
+  logs)
+    tail -n 50 -f logs/pilot.log
+    ;;
+  status)
+    launchctl print "$DOMAIN/$LABEL" 2>/dev/null | grep -E "state =|pid =|last exit" || echo "Not installed."
+    ;;
+  link)
+    show_link
+    ;;
+  remote)
+    if [[ ! -x "$TS" ]]; then
+      echo "Install Tailscale first (free): https://tailscale.com/download/mac — sign in, and install it on your phone with the same account."
+      exit 1
+    fi
+    "$TS" serve --bg "$PORT"
+    echo "✅ Private HTTPS link is on (only your own Tailscale devices can reach it)."
+    show_link
+    ;;
+  *)
+    echo "Usage: ./pilot.sh install | restart | stop | logs | status | link | remote"
+    ;;
+esac
