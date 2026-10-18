@@ -23,8 +23,8 @@ async function api(path, { method = "GET", body } = {}) {
 // ============================================================ native Mac app bridge
 // Blip.app (mac-app/) injects window.webkit.messageHandlers.blip*; in a browser these are no-ops.
 const nativeBridge = window.webkit?.messageHandlers;
-function nativeNotify(title, body) {
-  try { nativeBridge?.blipNotify?.postMessage({ title, body: String(body || "").slice(0, 240) }); } catch {}
+function nativeNotify(title, body, silent = false) {
+  try { nativeBridge?.blipNotify?.postMessage({ title, body: String(body || "").slice(0, 240), silent }); } catch {}
 }
 function nativeBadge(count) {
   try { nativeBridge?.blipBadge?.postMessage(count ? String(count) : ""); } catch {}
@@ -41,6 +41,11 @@ function useStore() {
     return () => store.listeners.delete(l);
   }, []);
   return store;
+}
+/** The phone's status bar color follows the app's theme (black unless Light, or Auto in light mode). */
+function setThemeColor(t) {
+  const light = t === "light" || (t === "auto" && matchMedia("(prefers-color-scheme: light)").matches);
+  document.querySelector('meta[name="theme-color"]')?.setAttribute("content", light ? "#ffffff" : "#000000");
 }
 let toastTimer;
 function toast(text) {
@@ -64,28 +69,61 @@ function reloadStateSoon() {
   clearTimeout(stateTimer);
   stateTimer = setTimeout(() => loadState().catch(() => {}), 250);
 }
+// Messages that arrive while a thread is loading are kept and merged in, so a reply never goes missing.
+const loading = {};
+const KEEP = 400;
+const mergeById = (base, extra) => {
+  const next = [...base];
+  for (const m of extra) {
+    const i = next.findIndex((x) => x.id === m.id);
+    if (i >= 0) next[i] = m;
+    else next.push(m);
+  }
+  return next.slice(-KEEP);
+};
+// Every message id the app has already shown, so updates (run steps, answered cards) never count as new.
+const seen = new Set();
+const markSeen = (list) => {
+  for (const m of list) seen.add(m.id);
+  if (seen.size > 5000) [...seen].slice(0, 2000).forEach((id) => seen.delete(id));
+};
 async function loadThread(botId) {
-  const { messages } = await api(`/thread/${botId}`);
+  loading[botId] ??= [];
+  try {
+    const { messages } = await api(`/thread/${botId}`);
+    const merged = mergeById(messages, loading[botId]);
+    markSeen(merged);
+    store.threads = { ...store.threads, [botId]: merged };
+    emit();
+  } finally {
+    delete loading[botId];
+  }
+}
+/** Like loadThread, but only re-renders when something changed (used when the live stream can't get through). */
+async function pollThread(botId) {
+  const { messages } = await api(`/thread/${botId}`).catch(() => ({}));
+  if (!messages) return;
+  const old = store.threads[botId];
+  if (old) for (const m of messages) if (!seen.has(m.id)) upsert(m, true); // notifications and unread still work
+  if (JSON.stringify(messages) === JSON.stringify(store.threads[botId])) return;
+  markSeen(messages);
   store.threads = { ...store.threads, [botId]: messages };
   emit();
 }
 function upsert(m, live) {
   const list = store.threads[m.botId];
-  if (list) {
-    const i = list.findIndex((x) => x.id === m.id);
-    const next = [...list];
-    if (i >= 0) next[i] = m;
-    else next.push(m);
-    store.threads = { ...store.threads, [m.botId]: next };
-  }
-  const isNew = !list || !list.some((x) => x.id === m.id);
-  if (live && isNew && m.role !== "user" && m.botId !== selectedBot()) {
+  if (list) store.threads = { ...store.threads, [m.botId]: mergeById(list, [m]) };
+  else if (loading[m.botId]) loading[m.botId].push(m);
+  const isNew = !seen.has(m.id);
+  seen.add(m.id);
+  const bot = store.state?.bots.find((b) => b.id === m.botId);
+  if (live && isNew && m.role !== "user" && m.kind !== "run" && m.botId !== selectedBot()) {
     store.unread = { ...store.unread, [m.botId]: (store.unread[m.botId] || 0) + 1 };
   }
   if (live && isNew && m.role !== "user" && (m.kind === "text" || m.kind === "card")) {
-    const name = store.state?.bots.find((b) => b.id === m.botId)?.name || "Blip";
+    const name = bot?.name || "Blip";
     if (m.kind === "card") nativeNotify(m.card.type === "suggestion" ? `${name} has a suggestion` : `${name} needs you`, m.card.title);
-    else if (m.role === "bot" && m.text) nativeNotify(name, m.text);
+    else if (m.role === "bot" && m.text) nativeNotify(name, m.text, !!bot?.quiet);
   }
   if (live && isNew && m.role === "bot" && m.kind === "text" && m.meta?.voice && m.text && "speechSynthesis" in window) {
     speechSynthesis.speak(new SpeechSynthesisUtterance(m.text.replace(/[•*_#`]/g, "").slice(0, 1500)));
@@ -115,7 +153,7 @@ function ago(ts) {
 const bytes = (n) => (n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(0)} KB` : `${(n / 1048576).toFixed(1)} MB`);
 const fileUrl = (p, download) => `/api/file?path=${encodeURIComponent(p)}${download ? "&download=1" : ""}`;
 const isImage = (p) => /\.(png|jpe?g|gif|webp)$/i.test(p);
-const shortModel = (m) => (m || "").replace(/^claude-/, "").replace(/-(\d)-(\d)$/, " $1.$2").replace(/-(\d)$/, " $1");
+const shortModel = (m) => (!m || m === "auto" ? "Auto" : m).replace(/^claude-/, "").replace(/-(\d)-(\d)$/, " $1.$2").replace(/-(\d)$/, " $1");
 const esc = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 function inline(s) {
   return s
@@ -282,6 +320,13 @@ function Blip({ size, state = "idle", still = false, tight = false, look }) {
   return html`<div class=${`m ${still ? "still" : ""}`} data-state=${state} style=${style} dangerouslySetInnerHTML=${{ __html: blipSvg(look, tight) }} />`;
 }
 const Mark = () => html`<${Blip} size=${26} still tight />`;
+// Every mascot blinks together off one class toggle, so the SVGs only repaint during the blink.
+if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  setInterval(() => {
+    document.documentElement.classList.add("blink");
+    setTimeout(() => document.documentElement.classList.remove("blink"), 150);
+  }, 4600);
+}
 
 // ============================================================ small components
 function Avatar({ bot, size = 34, status, still }) {
@@ -295,6 +340,13 @@ function Seg({ value, options, onChange }) {
   return html`<div class="seg">${options.map(([v, label]) => html`<button class=${v === value ? "on" : ""} onClick=${() => onChange(v)}>${label}</button>`)}</div>`;
 }
 function Sheet({ title, onClose, children, actions }) {
+  const close = useRef(onClose);
+  close.current = onClose;
+  useEffect(() => {
+    const onKey = (e) => e.key === "Escape" && close.current();
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
   return html`<div class="overlay" onClick=${(e) => e.target === e.currentTarget && onClose()}>
     <div class="sheet" role="dialog" aria-label=${title}>
       <div class="sheet-head"><h2>${title}</h2>${actions}<button class="icon-btn" onClick=${onClose} aria-label="Close"><${I.close} /></button></div>
@@ -305,6 +357,13 @@ function Sheet({ title, onClose, children, actions }) {
 function useLoad(fn, deps) {
   const [data, setData] = useState(null);
   const [tick, setTick] = useState(0);
+  // Different deps (another bot) start empty, so one bot's data never shows under another's name.
+  const key = JSON.stringify(deps);
+  const lastKey = useRef(key);
+  if (lastKey.current !== key) {
+    lastKey.current = key;
+    if (data !== null) setData(null);
+  }
   useEffect(() => {
     let alive = true;
     fn().then((d) => alive && setData(d)).catch(fail);
@@ -315,7 +374,7 @@ function useLoad(fn, deps) {
 
 function botStatus(bot, st) {
   const rt = st.runtime;
-  if (bot.running) return rt.pendingCards ? { cls: "wait", dot: "wait", text: "Waiting for you" } : { cls: "live", dot: "live", text: rt.current?.step || "Working…" };
+  if (bot.running) return bot.waiting ? { cls: "wait", dot: "wait", text: "Waiting for you" } : { cls: "live", dot: "live", text: bot.step || "Working…" };
   if (bot.queued) return { cls: "", dot: "", text: `${bot.queued} queued` };
   return { cls: "", dot: null, text: bot.job };
 }
@@ -360,7 +419,7 @@ function Sidebar({ st, open, onSelect, onSheet, onClose }) {
         ${st.bots.map((b) => {
           const s = botStatus(b, st);
           const unread = store.unread[b.id];
-          const waiting = (store.threads[b.id] || []).filter((m) => m.card?.status === "pending").length;
+          const waiting = b.waiting || (store.threads[b.id] || []).filter((m) => m.card?.status === "pending").length;
           return html`<button class=${`bot-row ${b.id === selected ? "active" : ""}`} onClick=${() => onSelect(b.id)}>
             <${Avatar} bot=${b} size=${36} status=${s.dot} />
             <div class="meta">
@@ -410,7 +469,7 @@ function Feedback({ m }) {
     <button class=${`fb ${m.meta?.feedback === "down" ? "picked" : ""}`} onClick=${() => setAsking(!asking)} aria-label="Bad answer"><${I.down} /></button>
     ${asking
       ? html`<form style="display:flex;gap:6px" onSubmit=${(e) => { e.preventDefault(); send(false, note); setAsking(false); }}>
-          <input class="input" style="height:30px;font-size:13px;width:230px" placeholder="What should it do differently?" value=${note} onInput=${(e) => setNote(e.target.value)} autofocus />
+          <input class="input fb-note" placeholder="What should it do differently?" value=${note} onInput=${(e) => setNote(e.target.value)} autofocus />
           <button class="btn small primary">Save</button>
         </form>`
       : null}
@@ -445,13 +504,13 @@ function RunBlock({ m, bot }) {
   const last = r.steps.at(-1)?.text;
   const stateIcon = { done: I.okCircle, failed: I.xCircle, stopped: I.dash, "nothing new": I.dash, waiting: I.pauseCircle }[r.status];
   const title = r.status === "waiting" ? "Waiting for you" : live ? (r.stalled ? "Still working" : "Working") : r.status === "failed" ? "Failed" : r.status === "stopped" ? "Stopped" : r.status === "nothing new" ? "Nothing new" : `Worked for ${dur(elapsed)}`;
-  const sub = live ? (r.status === "waiting" ? "answer below" : last || "Starting") : `${r.steps.length} step${r.steps.length === 1 ? "" : "s"}${r.costUsd && store.state?.authMode !== "plan" ? ` · ${money(r.costUsd)}` : ""}`;
+  const sub = live ? (r.status === "waiting" ? "answer below" : last || "Starting") : `${r.model ? `${r.model} · ` : ""}${r.steps.length} step${r.steps.length === 1 ? "" : "s"}${r.costUsd && store.state?.authMode !== "plan" ? ` · ${money(r.costUsd)}` : ""}`;
   const shown = live ? r.steps.slice(-8) : r.steps;
   return html`<div class=${`run ${live ? "live" : ""} ${r.status === "waiting" ? "waiting" : ""}`}>
     <button class="run-head" onClick=${() => setOpen(!isOpen)}>
       ${live ? html`<${Blip} size=${32} look=${bot?.look} state=${r.status === "waiting" ? "needs" : "working"} />` : html`<span class="state-dot" style=${r.status === "failed" ? "color:var(--danger)" : ""}><${stateIcon || I.okCircle} /></span>`}
       <span class="label"><b class=${live && r.status !== "waiting" ? "shimmer" : ""}>${title}</b><span>${sub}</span></span>
-      ${live ? html`<span class="time">${dur(elapsed)}</span>` : null}
+      ${live ? html`<span class="time">${r.model ? `${r.model} · ` : ""}${dur(elapsed)}</span>` : null}
       <span class=${`chev ${isOpen ? "open" : ""}`}><${I.chevron} /></span>
     </button>
     ${isOpen && (r.plan.length || r.steps.length)
@@ -511,8 +570,10 @@ function MessageList({ bot, messages, onImage, onTakeover }) {
     const el = ref.current;
     if (el && stick.current) el.scrollTop = el.scrollHeight;
   });
-  useEffect(() => {
+  // Switching bots always opens at the latest message.
+  useLayoutEffect(() => {
     stick.current = true;
+    if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
   }, [bot.id]);
   const onScroll = () => {
     const el = ref.current;
@@ -539,7 +600,22 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
   const [busy, setBusy] = useState(false);
   const ta = useRef();
   const fileInput = useRef();
+  const recRef = useRef(null);
+  const sending = useRef(false);
   const running = bot.running;
+
+  // Leaving this bot (or the app) while recording turns the mic off: it must never stay on in the background.
+  useEffect(() => () => {
+    const r = recRef.current;
+    if (r) {
+      r.onstop = null;
+      if (r.state !== "inactive") r.stop();
+      r.stream.getTracks().forEach((t) => t.stop());
+    }
+  }, []);
+  const filesRef = useRef(files);
+  filesRef.current = files;
+  useEffect(() => () => filesRef.current.forEach((f) => f.preview && URL.revokeObjectURL(f.preview)), []);
 
   useEffect(() => setText(localStorage.getItem(`draft:${bot.id}`) || ""), [bot.id]);
   useEffect(() => {
@@ -561,39 +637,54 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
 
   const send = async (overrideText, voice) => {
     const body = (overrideText ?? text).trim();
-    if (!body && !files.length) return;
+    if ((!body && !files.length) || sending.current) return; // a double Enter on a slow link sends once
+    sending.current = true;
     setBusy(true);
+    const sentFiles = files;
+    // Clear right away, so anything typed while it sends isn't wiped; put it back if sending fails.
+    if (overrideText === undefined) setText("");
+    setFiles([]);
     try {
-      await api("/send", { method: "POST", body: { botId: bot.id, text: body, voice, attachments: files.map(({ name, type, data }) => ({ name, type, data })) } });
-      if (overrideText === undefined) setText("");
-      setFiles([]);
+      await api("/send", { method: "POST", body: { botId: bot.id, text: body, voice, attachments: sentFiles.map(({ name, type, data }) => ({ name, type, data })) } });
+      sentFiles.forEach((f) => f.preview && URL.revokeObjectURL(f.preview));
     } catch (e) {
+      if (overrideText === undefined) setText((now) => (now ? now : body));
+      setFiles((now) => [...sentFiles, ...now]);
       fail(e);
     } finally {
+      sending.current = false;
       setBusy(false);
     }
   };
   const pick = async (e) => {
     const list = [...e.target.files];
     e.target.value = "";
+    let total = filesRef.current.reduce((n, f) => n + f.data.length * 0.75, 0);
     for (const f of list) {
       if (f.size > 25_000_000) {
         toast(`${f.name} is over 25 MB`);
         continue;
       }
+      if (total + f.size > 40_000_000) {
+        toast("That's over 40 MB in one message. Send the rest in another message.");
+        break;
+      }
+      total += f.size;
       const data = await readAsBase64(f);
       setFiles((prev) => [...prev, { name: f.name, type: f.type, data, preview: f.type.startsWith("image/") ? URL.createObjectURL(f) : null }]);
     }
   };
   const toggleMic = async () => {
     if (rec) return rec.stop();
+    let stream;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const mr = new MediaRecorder(stream);
       const chunks = [];
       mr.ondataavailable = (e) => chunks.push(e.data);
       mr.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
+        recRef.current = null;
         setRec(null);
         const blob = new Blob(chunks, { type: mr.mimeType });
         toast("Transcribing…");
@@ -607,9 +698,18 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
         }
       };
       mr.start();
+      recRef.current = mr;
       setRec(mr);
-    } catch {
-      toast("Microphone not available (needs the HTTPS app link)");
+    } catch (err) {
+      stream?.getTracks().forEach((t) => t.stop());
+      const name = err?.name || "";
+      toast(
+        !window.isSecureContext ? "The mic needs the secure https:// link. Open Blip from the Tailscale link."
+        : name === "NotAllowedError" ? "Blip isn't allowed to use the mic. iPhone: Settings → Apps → Safari → Microphone → Allow, then reopen Blip."
+        : name === "NotFoundError" ? "No microphone found on this device."
+        : typeof MediaRecorder === "undefined" ? "This browser can't record audio. Update iOS, or use Safari or Chrome."
+        : `Couldn't start the mic: ${err?.message || name || "unknown error"}`,
+      );
     }
   };
   const onKey = (e) => {
@@ -624,8 +724,8 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
   return html`<div class="composer-wrap">
     <div class="composer">
       ${files.length
-        ? html`<div class="attach-list">${files.map((f, i) => html`<span class="chip">${f.preview ? html`<img src=${f.preview} style="width:20px;height:20px;border-radius:4px;object-fit:cover" />` : "📎"} ${f.name.slice(0, 24)}
-            <button onClick=${() => setFiles(files.filter((_, j) => j !== i))} aria-label="Remove">×</button></span>`)}</div>`
+        ? html`<div class="attach-list">${files.map((f, i) => html`<span class="chip">${f.preview ? html`<img src=${f.preview} style="width:20px;height:20px;border-radius:4px;object-fit:cover" />` : html`<${I.clip} />`} ${f.name.slice(0, 24)}
+            <button onClick=${() => { if (f.preview) URL.revokeObjectURL(f.preview); setFiles(files.filter((_, j) => j !== i)); }} aria-label="Remove">×</button></span>`)}</div>`
         : null}
       <textarea ref=${ta} rows="1" placeholder=${running ? `Steer ${bot.name} while it works…` : `What should ${bot.name} do?`} value=${text} onInput=${(e) => setText(e.target.value)} onKeyDown=${onKey} />
       <div class="composer-row">
@@ -644,78 +744,445 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
 }
 
 // ============================================================ right panel
-function ComputerPanel({ control, setControl }) {
-  const [src, setSrc] = useState(null);
-  const [error, setError] = useState(null);
-  const [ripples, setRipples] = useState([]);
-  const [typed, setTyped] = useState("");
-  const img = useRef();
+// ============================================================ remote control (Chrome Remote Desktop-style)
+const QUALITY = { smooth: { w: 1024, fps: 12, label: "Smooth" }, balanced: { w: 1280, fps: 10, label: "Balanced" }, sharp: { w: 1680, fps: 6, label: "Sharp" } };
+
+/** Live video of the Mac's screen. Streams JPEG frames; falls back to snapshots if the stream can't get through. */
+/** True while the app is on screen. Streams pause in the background so the Mac isn't recording for nobody. */
+function usePageVisible() {
+  const [visible, setVisible] = useState(!document.hidden);
   useEffect(() => {
-    let alive = true;
-    let url;
-    const loop = async () => {
+    const on = () => setVisible(!document.hidden);
+    document.addEventListener("visibilitychange", on);
+    return () => document.removeEventListener("visibilitychange", on);
+  }, []);
+  return visible;
+}
+
+function useScreenStream(imgRef, { w, fps }, wanted) {
+  const [info, setInfo] = useState({ live: false, slow: false, fps: 0, error: null });
+  const visible = usePageVisible();
+  const enabled = wanted && visible;
+  useEffect(() => {
+    if (!enabled) return;
+    let alive = true, frames = 0, lastFrame = 0, ctrl, attempts = 0, polling = false;
+    // Every frame's image URL is freed as soon as a newer one is on screen (frames can arrive faster than
+    // the phone decodes them, and leaking them crashes the app within minutes).
+    const urls = new Set();
+    const show = (blob) => {
+      const img = imgRef.current;
+      if (!img) return;
+      const next = URL.createObjectURL(blob);
+      urls.add(next);
+      img.onload = img.onerror = () => {
+        for (const u of urls) if (u !== next) { URL.revokeObjectURL(u); urls.delete(u); }
+      };
+      img.src = next;
+      frames++;
+      attempts = 0; // it's working again
+      lastFrame = Date.now();
+    };
+    const poll = async () => {
+      polling = true;
       while (alive) {
-        if (!document.hidden) {
-          try {
-            const res = await fetch("/api/screen", { cache: "no-store" });
-            if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "Screen unavailable");
-            const next = URL.createObjectURL(await res.blob());
-            if (url) URL.revokeObjectURL(url);
-            url = next;
-            if (alive) {
-              setSrc(next);
-              setError(null);
-            }
-          } catch (e) {
-            if (alive) setError(e.message);
-          }
+        try {
+          const res = await fetch("/api/screen", { cache: "no-store" });
+          if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || "The screen isn't available");
+          show(await res.blob());
+          setInfo((i) => ({ ...i, slow: true, error: null }));
+        } catch (e) {
+          if (alive) setInfo((i) => ({ ...i, error: e.message }));
         }
-        await new Promise((r) => setTimeout(r, control ? 450 : 1100));
+        await new Promise((r) => setTimeout(r, 400));
       }
     };
-    loop();
+    const stream = async () => {
+      ctrl = new AbortController();
+      try {
+        const res = await fetch(`/api/screen/stream?w=${w}&fps=${fps}`, { signal: ctrl.signal, cache: "no-store" });
+        if (!res.ok || !res.body) throw new Error((await res.json().catch(() => ({}))).error || "Live view unavailable");
+        const reader = res.body.getReader();
+        let buf = new Uint8Array(0);
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done || !alive) break;
+          const merged = new Uint8Array(buf.length + value.length);
+          merged.set(buf);
+          merged.set(value, buf.length);
+          buf = merged;
+          let latest = null; // several frames in one chunk: only the newest is worth drawing
+          while (buf.length >= 4) {
+            const n = ((buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3]) >>> 0;
+            if (buf.length < 4 + n) break;
+            latest = buf.slice(4, 4 + n);
+            buf = buf.slice(4 + n);
+          }
+          if (latest) show(new Blob([latest], { type: "image/jpeg" }));
+        }
+      } catch (e) {
+        if (alive && e.name !== "AbortError") setInfo((i) => ({ ...i, error: e.message }));
+      }
+    };
+    const start = () => {
+      attempts++;
+      lastFrame = Date.now();
+      stream();
+    };
+    start();
+    // Watchdog: restart a stalled stream, and switch to snapshots if streaming keeps failing.
+    const tick = setInterval(() => {
+      const fpsNow = frames;
+      frames = 0;
+      const stalled = Date.now() - lastFrame > 5000;
+      setInfo((i) => ({ ...i, fps: fpsNow, live: !stalled && fpsNow > 0 }));
+      if (stalled && !polling) {
+        ctrl?.abort();
+        // Say why, if the Mac knows (e.g. Screen Recording permission is off).
+        api("/screen/status").then((st) => alive && st?.error && setInfo((i) => ({ ...i, error: st.error }))).catch(() => {});
+        if (attempts < 3) start();
+        else poll();
+      }
+    }, 1000);
     return () => {
       alive = false;
-      if (url) URL.revokeObjectURL(url);
+      clearInterval(tick);
+      ctrl?.abort();
+      for (const u of urls) URL.revokeObjectURL(u);
     };
-  }, [control]);
-  const act = (action, body) => api(`/screen/${action}`, { method: "POST", body }).catch(fail);
-  const tap = (kind) => (e) => {
-    if (!control) return;
-    e.preventDefault();
-    const el = img.current;
-    const rect = el.getBoundingClientRect();
-    const x = ((e.clientX - rect.left) / rect.width) * el.naturalWidth;
-    const y = ((e.clientY - rect.top) / rect.height) * el.naturalHeight;
-    const id = Math.random();
-    setRipples((r) => [...r, { id, left: e.clientX - rect.left, top: e.clientY - rect.top }]);
-    setTimeout(() => setRipples((r) => r.filter((p) => p.id !== id)), 500);
-    act("click", { x, y, kind });
-  };
-  const keys = [["Return", "return"], ["Tab", "tab"], ["Esc", "esc"], ["⌫", "delete"], ["⌘Space", "cmd+space"], ["⌘A", "cmd+a"], ["⌘C", "cmd+c"], ["⌘V", "cmd+v"], ["↑", "arrow-up"], ["↓", "arrow-down"], ["←", "arrow-left"], ["→", "arrow-right"]];
-  return html`<div>
-    <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
-      <${Seg} value=${control ? "control" : "watch"} options=${[["watch", "Watching"], ["control", "Take control"]]} onChange=${(v) => setControl(v === "control")} />
+  }, [enabled, w, fps]);
+  return info;
+}
+
+const screenApi = (action, body) => api(`/screen/${action}`, { method: "POST", body }).catch(fail);
+
+function ComputerPanel({ setControl, control }) {
+  const img = useRef();
+  // While full-screen control is open it has its own stream; two at once would halve the frame rate.
+  const info = useScreenStream(img, { w: 960, fps: 4 }, !control);
+  return html`<div style="display:grid;gap:12px">
+    <button class="btn primary" style="height:44px" onClick=${() => setControl(true)}><${I.computer} /> Control this Mac</button>
+    <div class="screen-box">
+      <img ref=${img} alt="Your Mac's screen" draggable="false" />
+      <span class="chip screen-badge">${info.live ? `Live · ${info.fps} fps` : info.slow ? "Snapshots" : "Connecting…"}</span>
     </div>
-    ${error
-      ? html`<div class="card-note">${error}</div>`
-      : html`<div class=${`screen-box ${control ? "control" : ""}`}>
-          ${src ? html`<img ref=${img} src=${src} alt="Your Mac's screen" onClick=${tap("left")} onDblClick=${tap("double")} onContextMenu=${tap("right")} draggable="false" />` : html`<div class="empty" style="color:#999">Connecting…</div>`}
-          <span class="chip screen-badge" style="background:rgba(0,0,0,.55);color:#fff">${control ? "🎮 You're in control" : "👀 Watching"}</span>
-          ${ripples.map((p) => html`<span class="ripple" style=${`left:${p.left}px;top:${p.top}px`} />`)}
-        </div>`}
-    ${control
-      ? html`<form class="type-row" onSubmit=${(e) => { e.preventDefault(); if (typed) act("type", { text: typed }); setTyped(""); }}>
-          <input class="input" placeholder="Type on the Mac…" value=${typed} onInput=${(e) => setTyped(e.target.value)} autocomplete="off" autocapitalize="off" />
-          <button class="btn primary small">Type</button>
-        </form>
-        <div class="keys">
-          ${keys.map(([label, k]) => html`<button class="btn small" onClick=${() => act("key", { keys: k })}>${label}</button>`)}
-          <button class="btn small" onClick=${() => act("scroll", { direction: "up" })}>Scroll ↑</button>
-          <button class="btn small" onClick=${() => act("scroll", { direction: "down" })}>Scroll ↓</button>
+    ${info.error && !info.live ? html`<div class="card-note">${info.error}</div>` : null}
+    <p class="hint">This is your bots' computer, live. Tap “Control this Mac” for full-screen control like Chrome Remote Desktop: use it for passwords, codes and payments. The bot never sees what you type there.</p>
+  </div>`;
+}
+
+const REMOTE_KEYS = [
+  ["Esc", "esc"], ["Tab", "tab"], ["Return", "return"], ["⌫", "delete"], ["Space", "space"],
+  ["⌘ Space", "cmd+space"], ["⌘ Tab", "cmd+tab"], ["⌘ C", "cmd+c"], ["⌘ V", "cmd+v"], ["⌘ X", "cmd+x"], ["⌘ A", "cmd+a"], ["⌘ Z", "cmd+z"],
+  ["⌘ F", "cmd+f"], ["⌘ W", "cmd+w"], ["⌘ R", "cmd+r"], ["←", "arrow-left"], ["↑", "arrow-up"], ["↓", "arrow-down"], ["→", "arrow-right"],
+  ["Page ↑", "page-up"], ["Page ↓", "page-down"],
+];
+
+/** Full-screen remote control: trackpad or touch mode, pinch zoom, two-finger scroll, live keyboard. */
+function RemoteView({ onClose }) {
+  const [mode, setMode] = useState(() => localStorage.getItem("remote-mode") || (coarse ? "trackpad" : "touch"));
+  const [quality, setQuality] = useState(() => localStorage.getItem("remote-quality") || "balanced");
+  const [keysOpen, setKeysOpen] = useState(false);
+  const [cursor, setCursor] = useState({ x: 0.5, y: 0.5 });
+  const [view, setView] = useState({ s: 1, tx: 0, ty: 0 });
+  const [dragging, setDragging] = useState(false);
+  const stage = useRef(), img = useRef(), kbd = useRef();
+  const info = useScreenStream(img, QUALITY[quality], true);
+  const cur = useRef(cursor);
+  cur.current = cursor;
+  const v = useRef(view);
+  v.current = view;
+
+  useEffect(() => {
+    try { localStorage.setItem("remote-mode", mode); localStorage.setItem("remote-quality", quality); } catch {}
+  }, [mode, quality]);
+
+  // ---- input senders. Everything except plain pointer moves goes through one queue so keys, text and
+  // clicks reach the Mac in the order you did them; moves and scrolls are throttled.
+  const chain = useRef(Promise.resolve());
+  // Each action gets at most 8 s, so one hung request can't silently block every later click and key.
+  const act = (action, body) =>
+    (chain.current = chain.current.then(() => Promise.race([screenApi(action, body), new Promise((r) => setTimeout(r, 8000))])));
+  const moveTimer = useRef(), pendingMove = useRef(null);
+  const sendMove = (nx, ny, action = "move") => {
+    pendingMove.current = { nx, ny, action };
+    if (moveTimer.current) return;
+    moveTimer.current = setTimeout(() => {
+      moveTimer.current = null;
+      const m = pendingMove.current;
+      if (!m) return;
+      if (m.action === "move") screenApi("pointer", { action: "move", nx: m.nx, ny: m.ny });
+      else act("pointer", { action: m.action, nx: m.nx, ny: m.ny });
+    }, 70);
+  };
+  const scrollAcc = useRef({ dx: 0, dy: 0 }), scrollTimer = useRef();
+  const sendScroll = (dx, dy) => {
+    scrollAcc.current.dx += dx;
+    scrollAcc.current.dy += dy;
+    if (scrollTimer.current) return;
+    scrollTimer.current = setTimeout(() => {
+      scrollTimer.current = null;
+      const a = scrollAcc.current;
+      scrollAcc.current = { dx: 0, dy: 0 };
+      if (Math.abs(a.dx) + Math.abs(a.dy) > 1) act("wheel", { dx: Math.round(a.dx), dy: Math.round(a.dy) });
+    }, 110);
+  };
+  const textQueue = useRef(""), textTimer = useRef();
+  const flushText = () => {
+    clearTimeout(textTimer.current);
+    textTimer.current = null;
+    const t = textQueue.current;
+    textQueue.current = "";
+    if (t) act("type", { text: t });
+  };
+  const typeText = (t) => {
+    textQueue.current += t;
+    if (!textTimer.current) textTimer.current = setTimeout(flushText, 120);
+  };
+  const pressKey = (keys) => {
+    flushText();
+    act("key", { keys });
+  };
+
+  // ---- coordinates
+  const norm = (clientX, clientY) => {
+    const r = img.current.getBoundingClientRect();
+    return { x: Math.min(1, Math.max(0, (clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (clientY - r.top) / r.height)) };
+  };
+  const clampView = (s, tx, ty) => {
+    const st = stage.current.getBoundingClientRect();
+    const maxX = (st.width * (s - 1)) / 2, maxY = (st.height * (s - 1)) / 2;
+    return { s, tx: Math.min(maxX, Math.max(-maxX, tx)), ty: Math.min(maxY, Math.max(-maxY, ty)) };
+  };
+
+  // ---- clicks with double-tap detection
+  const tapTimer = useRef(), lastTap = useRef(null);
+  const tapAt = (nx, ny) => {
+    if (tapTimer.current && lastTap.current && Math.hypot(lastTap.current.nx - nx, lastTap.current.ny - ny) < 0.04) {
+      clearTimeout(tapTimer.current);
+      tapTimer.current = null;
+      lastTap.current = null;
+      return act("pointer", { action: "double", nx, ny });
+    }
+    lastTap.current = { nx, ny };
+    tapTimer.current = setTimeout(() => {
+      tapTimer.current = null;
+      act("pointer", { action: "click", nx, ny });
+    }, 230);
+  };
+
+  // ---- touch gestures
+  const pts = useRef(new Map()), g = useRef({}), lastTouch = useRef(0);
+  const fromTouch = () => Date.now() - lastTouch.current < 1000;
+  const onPointerDown = (e) => {
+    if (e.pointerType === "mouse") return;
+    e.preventDefault();
+    lastTouch.current = Date.now();
+    stage.current.setPointerCapture?.(e.pointerId);
+    pts.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const list = [...pts.current.values()];
+    if (list.length === 1) {
+      g.current = { kind: "one", sx: e.clientX, sy: e.clientY, lx: e.clientX, ly: e.clientY, t: Date.now(), moved: 0 };
+      clearTimeout(g.current.hold);
+      g.current.hold = setTimeout(() => {
+        if (g.current.kind !== "one" || g.current.moved > 8) return;
+        navigator.vibrate?.(12);
+        if (mode === "trackpad") {
+          g.current.kind = "drag"; // long-press then move = drag
+          setDragging(true);
+          act("pointer", { action: "down", nx: cur.current.x, ny: cur.current.y });
+        } else {
+          g.current.kind = "done";
+          const n = norm(g.current.sx, g.current.sy);
+          act("pointer", { action: "right", nx: n.x, ny: n.y });
+        }
+      }, 480);
+    } else if (list.length === 2) {
+      clearTimeout(g.current.hold);
+      const [a, b] = list;
+      g.current = { kind: "two", d0: Math.hypot(a.x - b.x, a.y - b.y), cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2, t: Date.now(), moved: 0, s0: v.current.s, tx0: v.current.tx, ty0: v.current.ty, pinch: false };
+    }
+  };
+  const onPointerMove = (e) => {
+    if (e.pointerType === "mouse") {
+      if (mode === "touch") {
+        const n = norm(e.clientX, e.clientY);
+        sendMove(n.x, n.y);
+      }
+      return;
+    }
+    if (!pts.current.has(e.pointerId)) return;
+    pts.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const st = g.current;
+    const list = [...pts.current.values()];
+    if ((st.kind === "one" || st.kind === "drag") && list.length === 1) {
+      const dx = e.clientX - st.lx, dy = e.clientY - st.ly;
+      st.lx = e.clientX;
+      st.ly = e.clientY;
+      st.moved += Math.abs(dx) + Math.abs(dy);
+      if (mode === "trackpad") {
+        const r = img.current.getBoundingClientRect();
+        const speed = Math.hypot(dx, dy);
+        const accel = 1 + Math.min(1.2, speed / 25); // faster swipes move further, like a real trackpad
+        const nx = Math.min(1, Math.max(0, cur.current.x + (dx * accel) / r.width));
+        const ny = Math.min(1, Math.max(0, cur.current.y + (dy * accel) / r.height));
+        setCursor({ x: nx, y: ny });
+        sendMove(nx, ny, st.kind === "drag" ? "drag" : "move");
+      } else if (v.current.s > 1) {
+        setView(clampView(v.current.s, v.current.tx + dx, v.current.ty + dy));
+      }
+    } else if (st.kind === "two" && list.length === 2) {
+      const [a, b] = list;
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      const cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+      st.moved += Math.abs(cy - st.cy) + Math.abs(d - st.d0) / 4;
+      if (st.pinch || Math.abs(d - st.d0) > 24) {
+        st.pinch = true; // pinch zooms the view (not the Mac)
+        const s = Math.min(4, Math.max(1, (st.s0 * d) / st.d0));
+        setView(clampView(s, st.tx0 + (cx - st.cx), st.ty0 + (cy - st.cy)));
+      } else {
+        sendScroll(0, (cy - (st.ly ?? st.cy)) * 3); // two-finger drag scrolls the Mac
+        st.ly = cy;
+      }
+    }
+  };
+  const flushDrag = () => {
+    // The last bit of a drag must arrive before the button is released, not after.
+    clearTimeout(moveTimer.current);
+    moveTimer.current = null;
+    const m = pendingMove.current;
+    pendingMove.current = null;
+    if (m && m.action === "drag") act("pointer", m);
+  };
+  const onPointerCancel = (e) => {
+    // The phone took the touch away (a system gesture or call): never treat that as a tap.
+    if (e.pointerType === "mouse") return;
+    lastTouch.current = Date.now();
+    const st = g.current;
+    pts.current.delete(e.pointerId);
+    clearTimeout(st.hold);
+    if (st.kind === "drag") {
+      flushDrag();
+      setDragging(false);
+      act("pointer", { action: "up", nx: cur.current.x, ny: cur.current.y });
+    }
+    if (pts.current.size === 0) g.current = {};
+  };
+  const onPointerUp = (e) => {
+    if (e.pointerType === "mouse") return;
+    lastTouch.current = Date.now();
+    const st = g.current;
+    pts.current.delete(e.pointerId);
+    clearTimeout(st.hold);
+    if (st.kind === "drag") {
+      flushDrag();
+      setDragging(false);
+      act("pointer", { action: "up", nx: cur.current.x, ny: cur.current.y });
+    } else if (st.kind === "one" && st.moved < 10 && Date.now() - st.t < 450) {
+      if (mode === "trackpad") tapAt(cur.current.x, cur.current.y);
+      else {
+        const n = norm(e.clientX, e.clientY);
+        setCursor(n);
+        tapAt(n.x, n.y);
+      }
+    } else if (st.kind === "two" && !st.pinch && st.moved < 16 && Date.now() - st.t < 400) {
+      const at = mode === "trackpad" ? cur.current : norm(st.cx, st.cy);
+      act("pointer", { action: "right", nx: at.x, ny: at.y }); // two-finger tap = right-click
+    }
+    if (pts.current.size === 0) g.current = {};
+    else if (st.kind === "two") g.current = { kind: "done" };
+  };
+
+  // ---- mouse and keyboard on a computer
+  const onClick = (e) => {
+    if ((e.pointerType && e.pointerType !== "mouse") || fromTouch()) return;
+    if (e.detail > 1) return;
+    const n = norm(e.clientX, e.clientY);
+    act("pointer", { action: "click", nx: n.x, ny: n.y });
+  };
+  const onDblClick = (e) => {
+    if (fromTouch()) return;
+    const n = norm(e.clientX, e.clientY);
+    act("pointer", { action: "double", nx: n.x, ny: n.y });
+  };
+  const onContextMenu = (e) => {
+    e.preventDefault();
+    if (coarse || fromTouch()) return;
+    const n = norm(e.clientX, e.clientY);
+    act("pointer", { action: "right", nx: n.x, ny: n.y });
+  };
+  const onWheel = (e) => {
+    e.preventDefault();
+    sendScroll(-e.deltaX, -e.deltaY);
+  };
+  useEffect(() => {
+    const SPECIAL = { Enter: "return", Backspace: "delete", Tab: "tab", Escape: "esc", ArrowLeft: "arrow-left", ArrowRight: "arrow-right", ArrowUp: "arrow-up", ArrowDown: "arrow-down", Delete: "fwd-delete", PageUp: "page-up", PageDown: "page-down", Home: "home", End: "end" };
+    const onKey = (e) => {
+      if (e.target === kbd.current) return; // the phone keyboard has its own handler
+      if (e.target.closest?.("input, textarea, select")) return;
+      const mods = [e.metaKey && "cmd", e.ctrlKey && "ctrl", e.altKey && "alt", e.shiftKey && SPECIAL[e.key] && "shift"].filter(Boolean);
+      if (SPECIAL[e.key]) {
+        e.preventDefault();
+        pressKey([...mods, SPECIAL[e.key]].join("+"));
+      } else if (e.key.length === 1) {
+        e.preventDefault();
+        if (e.metaKey || e.ctrlKey || e.altKey) pressKey([...mods, e.key.toLowerCase()].join("+"));
+        else typeText(e.key);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+
+  // ---- phone keyboard: a hidden field that forwards every keystroke
+  const onBeforeInput = (e) => {
+    e.preventDefault();
+    if (e.inputType === "insertText" || e.inputType === "insertReplacementText") typeText(e.data || "");
+    else if (e.inputType === "deleteContentBackward") pressKey("delete");
+    else if (e.inputType === "insertLineBreak" || e.inputType === "insertParagraph") pressKey("return");
+  };
+  const onKbdKey = (e) => {
+    const map = { Enter: "return", Backspace: "delete", Tab: "tab", Escape: "esc" };
+    if (map[e.key] && e.key !== "Backspace") {
+      e.preventDefault();
+      pressKey(map[e.key]);
+    }
+  };
+
+  const cursorStyle = `left:${cursor.x * 100}%;top:${cursor.y * 100}%`;
+  return html`<div class="remote" role="dialog" aria-label="Control your Mac">
+    <div class="remote-top">
+      <span class=${`chip ${info.live ? "live" : ""}`}>${info.live ? `Live · ${info.fps} fps` : info.slow ? "Snapshots (slow link)" : info.error ? "Not connected" : "Connecting…"}</span>
+      ${view.s > 1 ? html`<button class="chip btn" onClick=${() => setView({ s: 1, tx: 0, ty: 0 })}>${view.s.toFixed(1)}× · Reset zoom</button>` : null}
+      ${dragging ? html`<span class="chip">Dragging</span>` : null}
+      <span style="flex:1" />
+      <button class="icon-btn" onClick=${onClose} aria-label="Close remote control"><${I.close} /></button>
+    </div>
+    <div class="remote-stage" ref=${stage} onPointerDown=${onPointerDown} onPointerMove=${onPointerMove} onPointerUp=${onPointerUp} onPointerCancel=${onPointerCancel}
+      onClick=${onClick} onDblClick=${onDblClick} onContextMenu=${onContextMenu} onWheel=${onWheel}>
+      <div class="remote-canvas" style=${`transform:translate(${view.tx}px,${view.ty}px) scale(${view.s})`}>
+        <div class="remote-frame">
+          <img ref=${img} alt="Your Mac's screen" draggable="false" />
+          ${mode === "trackpad" ? html`<span class="remote-cursor" style=${cursorStyle}><svg viewBox="0 0 24 24"><path d="M5 3v16l4.5-4 3 7 3-1.3-3-6.7H18z" fill="#fff" stroke="#000" stroke-width="1.4" stroke-linejoin="round"/></svg></span>` : null}
         </div>
-        <p class="hint">Tap to click · double-tap to double-click · long-press for right-click. Use this for passwords, codes and payments — the bot never sees what you type here.</p>`
-      : html`<p class="hint">This is your bot's computer — your Mac, live. Switch to “Take control” to click and type yourself.</p>`}
+      </div>
+      ${info.error && !info.live && !info.slow ? html`<div class="remote-error">${info.error}</div>` : null}
+    </div>
+    ${keysOpen
+      ? html`<div class="remote-keys">${REMOTE_KEYS.map(([label, k]) => html`<button class="btn small" onClick=${() => pressKey(k)}>${label}</button>`)}</div>`
+      : null}
+    <div class="remote-bar">
+      <${Seg} value=${mode} options=${[["trackpad", "Trackpad"], ["touch", "Touch"]]} onChange=${setMode} />
+      <button class="btn small" onClick=${() => kbd.current?.focus()}>Keyboard</button>
+      <button class=${`btn small ${keysOpen ? "primary" : ""}`} onClick=${() => setKeysOpen(!keysOpen)}>Keys</button>
+      <button class="btn small" onClick=${() => act("pointer", { action: "right", nx: cursor.x, ny: cursor.y })}>Right-click</button>
+      <select class="input" style="height:30px;width:auto;flex:none;padding:0 8px;font-size:13px" value=${quality} onChange=${(e) => setQuality(e.target.value)} aria-label="Stream quality">
+        ${Object.entries(QUALITY).map(([k, q]) => html`<option value=${k}>${q.label}</option>`)}
+      </select>
+      <input ref=${kbd} class="remote-kbd" value="··" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" onBeforeInput=${onBeforeInput} onKeyDown=${onKbdKey} aria-label="Type on your Mac" />
+    </div>
+    <p class="remote-help">${mode === "trackpad"
+      ? "Drag to move the pointer · tap to click · tap twice to double-click · two-finger tap for right-click · two fingers up and down to scroll · hold, then drag to drag · pinch to zoom"
+      : "Tap where you want to click · hold for right-click · two fingers to scroll · pinch to zoom, then drag to look around"}</p>
   </div>`;
 }
 
@@ -774,7 +1241,7 @@ function Panel({ tab, setTab, bot, onClose, onImage, control, setControl }) {
       <button class="icon-btn" onClick=${onClose} aria-label="Close panel"><${I.close} /></button>
     </div>
     <div class="panel-body">
-      ${tab === "computer" ? html`<${ComputerPanel} control=${control} setControl=${setControl} />` : tab === "files" ? html`<${FilesPanel} onImage=${onImage} />` : html`<${MemoryPanel} bot=${bot} />`}
+      ${tab === "computer" ? html`<${ComputerPanel} setControl=${setControl} control=${control} />` : tab === "files" ? html`<${FilesPanel} onImage=${onImage} />` : html`<${MemoryPanel} bot=${bot} />`}
     </div>
   </aside>`;
 }
@@ -856,7 +1323,7 @@ function PairPhone() {
   const now = useNow(!!pair, 1000);
   const left = pair ? Math.max(0, Math.round((pair.expires - now) / 1000)) : 0;
   const start = () => api("/pair", { method: "POST" }).then(setPair).catch(fail);
-  const copy = (t) => navigator.clipboard?.writeText(t).then(() => toast("Copied")).catch(() => toast(t));
+  const copy = (t) => (navigator.clipboard ? navigator.clipboard.writeText(t).then(() => toast("Copied")).catch(() => toast(t)) : toast(t));
   const links = pair ? [...(pair.tailscale ? [pair.tailscale] : []), ...pair.lan] : [];
   return html`<div class="section-title">Connect your phone</div>
     ${!pair || left === 0
@@ -878,7 +1345,15 @@ function SettingsSheet({ st, onClose }) {
   const [connectors, reloadConnectors] = useLoad(() => api("/connectors"), []);
   const [newRule, setNewRule] = useState("");
   const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark");
-  const [pushOn, setPushOn] = useState(typeof Notification !== "undefined" && Notification.permission === "granted");
+  // "On" only when this device really has a push subscription the Mac knows about (re-sent on every visit).
+  const [pushOn, setPushOn] = useState(false);
+  useEffect(() => {
+    if (!("serviceWorker" in navigator) || typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    navigator.serviceWorker.ready
+      .then((reg) => reg.pushManager?.getSubscription())
+      .then((sub) => sub && api("/push/subscribe", { method: "POST", body: sub.toJSON() }).then(() => setPushOn(true)))
+      .catch(() => {});
+  }, []);
   const set = (patch) => api("/settings", { method: "PATCH", body: patch }).then(loadState).catch(fail);
   const pct = Math.min(100, (st.budget.today / st.budget.limit) * 100);
   const applyTheme = (t) => {
@@ -886,6 +1361,7 @@ function SettingsSheet({ st, onClose }) {
     localStorage.setItem("theme", t);
     if (t === "dark") document.documentElement.removeAttribute("data-theme");
     else document.documentElement.setAttribute("data-theme", t);
+    setThemeColor(t);
   };
   return html`<${Sheet} title="Settings" onClose=${onClose}>
     <div class="section-title">Claude connection</div>
@@ -906,6 +1382,7 @@ function SettingsSheet({ st, onClose }) {
     </div>
 
     <div class="section-title">Safety</div>
+    <div class="toggle-row"><div class="grow"><b>Full access</b><span>Bots act on their own: terminal, files, clicks, sending, deleting. Only payments, protected files and your Ask-first rules still ask.</span></div><${Switch} on=${st.settings.fullAccess} onChange=${(v) => set({ fullAccess: v })} /></div>
     <div class="toggle-row"><div class="grow"><b>Auto Review</b><span>An independent AI checks risky actions and only asks you when it matters.</span></div><${Switch} on=${st.settings.autoReview} onChange=${(v) => set({ autoReview: v })} /></div>
     <div class="toggle-row"><div class="grow"><b>Proactive suggestions</b><span>Your primary bot looks around (read-only) a few times a day and suggests things. Max 3/day.</span></div><${Switch} on=${st.settings.proactive} onChange=${(v) => set({ proactive: v })} /></div>
     <div class="toggle-row"><div class="grow"><b>Spoken replies</b><span>Read every reply aloud (voice messages always get spoken replies).</span></div><${Switch} on=${st.settings.voiceReplies} onChange=${(v) => set({ voiceReplies: v })} /></div>
@@ -927,8 +1404,8 @@ function SettingsSheet({ st, onClose }) {
     <${PairPhone} />
 
     <div class="section-title">This device</div>
-    <div class="toggle-row"><div class="grow"><b>Notifications</b><span>Get pinged for approvals, replies and routine results.</span></div>
-      <button class="btn small" disabled=${pushOn} onClick=${() => enablePush(st.pushKey).then(() => { setPushOn(true); toast("Notifications on"); }).catch(fail)}>${pushOn ? "On" : "Turn on"}</button></div>
+    ${nativeBridge?.blipNotify ? null : html`<div class="toggle-row"><div class="grow"><b>Notifications</b><span>Get pinged for approvals, replies and routine results.</span></div>
+      <button class="btn small" disabled=${pushOn} onClick=${() => enablePush(st.pushKey).then(() => { setPushOn(true); toast("Notifications on"); }).catch(fail)}>${pushOn ? "On" : "Turn on"}</button></div>`}
     <div class="toggle-row"><div class="grow"><b>Appearance</b></div><${Seg} value=${theme} options=${[["dark", "Dark"], ["light", "Light"], ["auto", "Auto"]]} onChange=${applyTheme} /></div>
     <p class="hint">Install on iPhone: open this page in Safari → Share → Add to Home Screen. ${st.telegram ? "Telegram is connected as an extra channel." : ""}</p>
   <//>`;
@@ -1011,8 +1488,8 @@ function StyleSheet({ bot, onClose }) {
 
 function BotSheet({ bot, st, onClose, onStyle }) {
   const [form, setForm] = useState({ name: bot.name, job: bot.job, style: bot.style });
-  const alias = st.models.find((m) => m.id === bot.model)?.alias || (bot.model === st.defaultModel ? "default" : bot.model);
-  const patch = (body) => api(`/bots/${bot.id}`, { method: "PATCH", body }).then(loadState).catch(fail);
+  const alias = bot.model === "auto" ? "auto" : st.models.find((m) => m.id === bot.model)?.alias || bot.model;
+  const patch = (body) => api(`/bots/${bot.id}`, { method: "PATCH", body }).then(loadState).then(() => true, (e) => (fail(e), false));
   const f = (k) => (e) => setForm({ ...form, [k]: e.target.value });
   return html`<${Sheet} title=${bot.name} onClose=${onClose}>
     <div class="row" style="border:1px solid var(--line);border-radius:16px;margin-bottom:16px">
@@ -1025,10 +1502,10 @@ function BotSheet({ bot, st, onClose, onStyle }) {
     </div>
     <div class="field"><label>Job</label><textarea class="input" value=${form.job} onInput=${f("job")} /></div>
     <div class="field"><label>Personality</label><input class="input" value=${form.style} onInput=${f("style")} /></div>
-    <button class="btn primary" onClick=${() => patch(form).then(() => toast("Saved"))}>Save</button>
+    <button class="btn primary" onClick=${() => patch(form).then((ok) => ok && toast("Saved"))}>Save</button>
     <div class="section-title" style="margin-top:22px">Model</div>
-    <${Seg} value=${alias} options=${[["opus", "Opus"], ["sonnet", "Sonnet"], ["haiku", "Haiku"]]} onChange=${(v) => patch({ model: v })} />
-    <p class="hint">Context used: ${Math.round(bot.contextTokens / 1000)}k tokens. Long chats cost more per message — start a new chat to reset (memory is kept).</p>
+    <${Seg} value=${alias} options=${[["auto", "Auto"], ["opus", "Opus"], ["sonnet", "Sonnet"], ["haiku", "Haiku"]]} onChange=${(v) => patch({ model: v })} />
+    <p class="hint">Auto answers quick chat on Sonnet and gives real jobs (research, browsing, building, email) to Opus. Context used: ${Math.round(bot.contextTokens / 1000)}k tokens. Long chats cost more per message — start a new chat to reset (memory is kept).</p>
     <div class="toggle-row"><div class="grow"><b>Quiet</b><span>Deliver this bot's messages without sound. Approvals still notify.</span></div><${Switch} on=${bot.quiet} onChange=${(v) => patch({ quiet: v })} /></div>
     <div class="toggle-row"><div class="grow"><b>Primary bot</b><span>Runs proactive check-ins and offers to help.</span></div>${st.primaryBotId === bot.id ? html`<span class="chip">Primary</span>` : html`<button class="btn small" onClick=${() => patch({ primary: true })}>Make primary</button>`}</div>
     <div style="display:flex;gap:8px;margin-top:18px;flex-wrap:wrap">
@@ -1134,7 +1611,15 @@ function Shell() {
   const [control, setControl] = useState(false);
   const [sheet, setSheet] = useState(null);
   const [lightbox, setLightbox] = useState(null);
-  const [botId, setBotId] = useState(() => new URLSearchParams(location.search).get("bot") || localStorage.getItem("bot"));
+  const [botId, setBotId] = useState(() => {
+    // A notification opens the app on its bot once; afterwards the URL mustn't keep overriding your choice.
+    const fromLink = new URLSearchParams(location.search).get("bot");
+    if (fromLink) {
+      try { history.replaceState(null, "", location.pathname); } catch {}
+      try { localStorage.setItem("bot", fromLink); } catch {}
+    }
+    return fromLink || localStorage.getItem("bot");
+  });
 
   const bot = st.bots.find((b) => b.id === botId) || st.bots.find((b) => b.id === st.activeBotId) || st.bots[0];
   selected = bot.id;
@@ -1147,7 +1632,7 @@ function Shell() {
     emit();
   };
   useEffect(() => {
-    if (!store.threads[bot.id]) loadThread(bot.id).catch(fail);
+    if (!store.threads[bot.id]) loadThread(bot.id).catch(() => setTimeout(() => !store.threads[bot.id] && loadThread(bot.id).catch(fail), 3000));
     if (store.unread[bot.id]) {
       store.unread = { ...store.unread, [bot.id]: 0 };
       emit();
@@ -1157,7 +1642,6 @@ function Shell() {
     try {
       panel ? localStorage.setItem("panel", panel) : localStorage.removeItem("panel");
     } catch {}
-    if (panel !== "computer") setControl(false);
   }, [panel]);
   useEffect(() => {
     const onMsg = (e) => e.data?.type === "open-bot" && e.data.botId && select(e.data.botId);
@@ -1176,6 +1660,7 @@ function Shell() {
     ${sheet?.type === "newbot" ? html`<${NewBotSheet} onClose=${() => setSheet(null)} onCreated=${(id, custom) => loadState().then(() => { select(id); if (custom) setSheet({ type: "style" }); })} />` : null}
     ${sheet?.type === "bot" ? html`<${BotSheet} bot=${bot} st=${st} onClose=${() => setSheet(null)} onStyle=${() => setSheet({ type: "style" })} />` : null}
     ${sheet?.type === "style" ? html`<${StyleSheet} bot=${bot} onClose=${() => setSheet(null)} />` : null}
+    ${control ? html`<${RemoteView} onClose=${() => setControl(false)} />` : null}
     ${lightbox ? html`<div class="lightbox" onClick=${() => setLightbox(null)}><img src=${lightbox} alt="" /></div>` : null}
     ${s.toast ? html`<div class="toast">${s.toast}</div>` : null}
   </div>`;
@@ -1194,19 +1679,53 @@ function App() {
   useEffect(boot, []);
   useEffect(() => {
     if (!authed) return;
-    const es = new EventSource("/api/events");
-    es.addEventListener("msg", (e) => upsert(JSON.parse(e.data), true));
-    es.addEventListener("state", reloadStateSoon);
-    es.addEventListener("open", () => {
-      // Catch anything missed while disconnected.
-      reloadStateSoon();
-      for (const id of Object.keys(store.threads)) loadThread(id).catch(() => {});
-    });
-    es.addEventListener("error", () => loadState().catch((e) => e instanceof AuthError && setAuthed(false)));
+    // The server sends "hello" on connect and "ping" every 20s. If neither gets through (some tunnels buffer
+    // the stream), poll instead so replies still show up.
+    let lastBeat = 0;
+    let es;
+    let retry;
+    let backoff = 1000;
+    const beat = () => (lastBeat = Date.now());
+    let opened = Date.now();
+    const poll = setInterval(() => {
+      const quiet = lastBeat ? Date.now() - lastBeat > 45_000 : Date.now() - opened > 4000;
+      if (!quiet || document.hidden) return;
+      loadState().catch(() => {});
+      for (const id of Object.keys(store.threads)) pollThread(id);
+    }, 2500);
+    const connect = () => {
+      es?.close();
+      opened = Date.now();
+      lastBeat = 0;
+      es = new EventSource("/api/events");
+      es.addEventListener("hello", () => (beat(), (backoff = 1000)));
+      es.addEventListener("ping", beat);
+      es.addEventListener("msg", (e) => (beat(), upsert(JSON.parse(e.data), true)));
+      es.addEventListener("state", () => (beat(), reloadStateSoon()));
+      es.addEventListener("open", () => {
+        // Catch anything missed while disconnected, including a chat that never finished loading.
+        reloadStateSoon();
+        const ids = new Set([...Object.keys(store.threads), selectedBot()].filter(Boolean));
+        for (const id of ids) loadThread(id).catch(() => {});
+      });
+      es.addEventListener("error", () => {
+        loadState().catch((e) => e instanceof AuthError && setAuthed(false));
+        // A restart behind Tailscale answers 502, which makes the browser give up on the stream for good:
+        // reconnect ourselves, waiting a bit longer each time.
+        if (es.readyState === EventSource.CLOSED) {
+          clearTimeout(retry);
+          retry = setTimeout(connect, backoff);
+          backoff = Math.min(backoff * 2, 30_000);
+        }
+      });
+    };
+    connect();
     const onVisible = () => !document.hidden && reloadStateSoon();
     document.addEventListener("visibilitychange", onVisible);
     return () => {
-      es.close();
+      es?.close();
+      clearTimeout(retry);
+      clearInterval(poll);
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [authed]);
@@ -1218,5 +1737,6 @@ function App() {
 
 const theme = localStorage.getItem("theme");
 if (theme === "light" || theme === "auto") document.documentElement.setAttribute("data-theme", theme);
+setThemeColor(theme);
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 render(html`<${App} />`, document.getElementById("app"));

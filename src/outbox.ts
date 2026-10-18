@@ -16,7 +16,7 @@ export function post(
   const msg = addMessage({ botId, role: opts.role ?? "bot", kind: "text", text, files, meta: opts.meta });
   if (opts.push !== false) {
     const quiet = opts.silent || state.bots.find((b) => b.id === botId)?.quiet;
-    void push({ title: opts.meta?.header ?? botName(botId), body: text || (files?.length ? `📎 ${files.join(", ")}` : ""), botId, tag: msg.id, silent: quiet });
+    void push({ title: opts.meta?.header ?? botName(botId), body: text || (files?.length ? `Sent ${files.length === 1 ? "a file" : `${files.length} files`}: ${files.map((f) => path.basename(f)).join(", ")}` : ""), botId, tag: msg.id, silent: quiet });
   }
   return msg;
 }

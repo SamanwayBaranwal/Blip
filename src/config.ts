@@ -56,11 +56,24 @@ export const config = {
 
 if (config.telegramToken && !config.ownerId) throw new Error("Set TELEGRAM_OWNER_ID too, or remove TELEGRAM_BOT_TOKEN to run app-only.");
 
+// Blip's own code and the folders that give a bot powers: writing there always asks (reading is fine).
+// .claude holds skills, agents and commands, which can carry their own tool permissions.
+export const WRITE_PROTECTED_PATHS = [
+  path.join(workspace, ".claude"),
+  path.join(ROOT, "dist"),
+  path.join(ROOT, "src"),
+  path.join(ROOT, "node_modules"),
+  path.join(ROOT, "blip.sh"),
+  path.join(ROOT, "package.json"),
+  path.join(os.homedir(), "Library", "LaunchAgents"),
+];
+
 // Paths the agent may never read or write without asking, even inside allowed areas.
 // The workspace's .claude settings and .mcp.json are here so a bot can't grant itself permissions or tools.
 export const SENSITIVE_PATHS = [
   ENV_FILE,
   config.dataDir,
+  path.join(ROOT, "logs"), // the log can hold the app link
   path.join(workspace, ".claude", "settings.json"),
   path.join(workspace, ".claude", "settings.local.json"),
   path.join(workspace, ".mcp.json"),

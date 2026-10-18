@@ -37,9 +37,10 @@ export function addSubscription(sub: webpush.PushSubscription) {
 export async function push(n: { title: string; body: string; botId?: string; tag?: string; silent?: boolean }) {
   if (!subs.length) return;
   const payload = JSON.stringify({ ...n, body: n.body.slice(0, 240) });
-  const results = await Promise.allSettled(subs.map((s) => webpush.sendNotification(s, payload, { TTL: 3600 })));
+  const list = subs; // subs may change while sending; match results to the list they came from
+  const results = await Promise.allSettled(list.map((s) => webpush.sendNotification(s, payload, { TTL: 3600 })));
   const gone = results
-    .map((r, i) => (r.status === "rejected" && [404, 410].includes((r.reason as { statusCode?: number }).statusCode ?? 0) ? subs[i]!.endpoint : undefined))
+    .map((r, i) => (r.status === "rejected" && [404, 410].includes((r.reason as { statusCode?: number }).statusCode ?? 0) ? list[i]!.endpoint : undefined))
     .filter(Boolean);
   if (gone.length) {
     subs = subs.filter((s) => !gone.includes(s.endpoint));

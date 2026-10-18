@@ -6,16 +6,28 @@ import { config } from "./config.js";
 
 // Voice in (Whisper, fully on this Mac) and voice out (macOS "say"), both via ffmpeg.
 const run = promisify(execFile);
-const bin = (name: string) => ["/opt/homebrew/bin", "/usr/local/bin"].map((d) => path.join(d, name)).find((p) => fs.existsSync(p)) ?? name;
+// Homebrew lives in /opt/homebrew on Apple Silicon and /usr/local on Intel; also check PATH.
+const bin = (name: string) =>
+  ["/opt/homebrew/bin", "/usr/local/bin", ...(process.env.PATH ?? "").split(":")]
+    .map((d) => path.join(d, name))
+    .find((p) => fs.existsSync(p));
+
+function need(name: string, pkg: string): string {
+  const found = bin(name);
+  if (!found) throw new Error(`Voice needs ${pkg}, which isn't installed on the Mac running Blip. In Terminal there, run: brew install ${pkg}`);
+  return found;
+}
 const tmpDir = path.join(config.dataDir, "voice");
 
 export async function transcribe(audioFile: string): Promise<string> {
-  if (!fs.existsSync(config.whisperModel)) throw new Error("Speech model missing (models/ggml-small.bin).");
+  if (!fs.existsSync(config.whisperModel)) throw new Error("The speech model is missing. On the Mac running Blip, run: ./blip.sh setup");
+  const ffmpeg = need("ffmpeg", "ffmpeg");
+  const whisper = need("whisper-cli", "whisper.cpp");
   fs.mkdirSync(tmpDir, { recursive: true });
   const base = path.join(tmpDir, `in-${Date.now()}`);
   try {
-    await run(bin("ffmpeg"), ["-y", "-loglevel", "error", "-i", audioFile, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", `${base}.wav`]);
-    await run(bin("whisper-cli"), ["-m", config.whisperModel, "-f", `${base}.wav`, "-l", "auto", "-nt", "-otxt", "-of", base], { timeout: 300_000 });
+    await run(ffmpeg, ["-y", "-loglevel", "error", "-i", audioFile, "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", `${base}.wav`]);
+    await run(whisper, ["-m", config.whisperModel, "-f", `${base}.wav`, "-l", "auto", "-nt", "-otxt", "-of", base], { timeout: 300_000 });
     return fs.readFileSync(`${base}.txt`, "utf8").trim();
   } finally {
     for (const ext of [".wav", ".txt"]) fs.rmSync(base + ext, { force: true });
@@ -28,7 +40,7 @@ export async function speak(text: string): Promise<string> {
   const base = path.join(tmpDir, `out-${Date.now()}`);
   const clean = text.replace(/[•*_#`]/g, "").slice(0, 2500);
   await run("/usr/bin/say", ["-o", `${base}.aiff`, clean], { timeout: 120_000 });
-  await run(bin("ffmpeg"), ["-y", "-loglevel", "error", "-i", `${base}.aiff`, "-c:a", "libopus", "-b:a", "32k", `${base}.ogg`]);
+  await run(need("ffmpeg", "ffmpeg"), ["-y", "-loglevel", "error", "-i", `${base}.aiff`, "-c:a", "libopus", "-b:a", "32k", `${base}.ogg`]);
   fs.rmSync(`${base}.aiff`, { force: true });
   return `${base}.ogg`;
 }

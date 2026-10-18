@@ -58,7 +58,19 @@ The UI is a PWA served by `src/web.ts`. Telegram is an optional mirror channel.
   - The key can be added in the app (`POST /api/setup/key`, written to `.env`).
   - The agent's env strips `CLAUDE*` and `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_BASE_URL`, so a parent Claude Code session's connection never leaks in.
 - **Install location.** The project must live outside Desktop, Documents and Downloads, because macOS TCC blocks launchd agents there. `blip.sh` enforces this. The intended location is `~/Blip`.
-- **One task at a time.** There's a global queue in `core.ts` because all bots share one Mac, one screen and one Chrome profile. Running bots in parallel is a known gap.
+- **Bots work in parallel** (`core.ts`). Each bot runs one task at a time, and up to `MAX_PARALLEL` bots (default 3) run at once. Messages to a busy bot steer its task.
+  - **The computer lock** (`computer.ts`): only the shared browser and screen are taken in turns. The browser and Mac tools acquire the lock in `canUseTool`, and the waiting task shows "Waiting for the computer: X is using it". When the lock passes to a different bot, the previous bot's engine is closed first so its Chrome releases the profile.
+  - **Engines:** one warm Agent SDK session per bot, at most `MAX_PARALLEL` alive, with the least recently used idle one closed first.
+- **Auto model** (`chooseModel` in `core.ts`) is the default when `bot.model` is unset:
+  - quick chat goes to `FAST_MODEL` (Sonnet 5.5)
+  - real jobs go to `MODEL` (Opus 5.5): the `BIG_TASK` verbs, more than 220 characters, or attachments
+  - routines use Opus and proactive check-ins use Sonnet
+  - the warm engine switches with `Query.setModel()`, and the run block shows which model handled it
+- **No surprise windows:** background work (proactive check-ins, routines) runs the browser headless with the same profile, so logins still work and windows never pop up while the user is at the Mac. Chats the user starts use a visible browser.
+  - Check-ins show in the chat as a quiet, collapsible run line ("Proactive check-in · read-only"), so it's always clear what Blip looked at.
+  - The user was alarmed to see Gmail open by itself on 2026-10-18: never do invisible-to-the-user actions without a visible trace.
+  - Blip on the development Mac (Samanways-MacBook-Air) is turned off and has no launch agent. Blip runs on the user's other laptop.
+- **Time limits** count only active time, not time spent waiting for approval or for the computer: chat 30 minutes (`TASK_LIMIT_MIN`), routines 15, proactive 5. The persona asks bots to verify their result before saying "done".
 - **Approvals** (`permissions.ts`):
   - Safe tools run automatically.
   - Workspace writes are automatic; protected paths (`.env`, `data/`, `~/.ssh`, the workspace's `.claude/settings*.json`, `.mcp.json`) always ask.
@@ -76,6 +88,69 @@ The UI is a PWA served by `src/web.ts`. Telegram is an optional mirror channel.
   - approvals send reminders at 10 and 60 minutes (no silent stalls)
   - a stall watchdog fires at 10 minutes
   - a context-length nudge appears past 400k tokens
+
+## Speed, remote control and voice (2026-10-18)
+
+- **Warm sessions** (`agent.ts`, `Session`):
+  - After a chat reply, the bot's Agent SDK session stays alive for 10 minutes, and the next message to that bot is pushed into the same session with no engine restart.
+  - Only one warm session exists at a time. It closes, gracefully, when any other bot or a routine starts, because they share the browser profile.
+  - It also closes when the bot's settings change, on New chat (`closeWarmSession`), and on Stop, which closes it by force.
+  - With an API key, sessions aren't kept warm, because each task needs a fresh budget cap.
+- **Remote control** (`src/screen.ts`):
+  - **Stream:** one shared ffmpeg runs per stream config (avfoundation "Capture screen 0" → MJPEG). It's served by `GET /api/screen/stream?w=&fps=` as 4-byte-length-prefixed JPEG frames. A slow viewer skips frames rather than lagging, and ffmpeg stops 3 seconds after the last viewer leaves.
+  - **Input:** `POST /api/screen/pointer` (move, click, double, right, down, drag, up) takes **normalized** nx/ny between 0 and 1, and is sent with cliclick. `POST /api/screen/wheel` does real scrolling with `CGEventCreateScrollWheelEvent2` through JavaScript for Automation. Typing and keys go through `/screen/type` and `/screen/key`.
+  - **Client:** `RemoteView` in `app.js`, with trackpad and touch modes, pinch zoom, two-finger scroll and right-click, hold-to-drag, a hidden input for the phone keyboard, and one serial queue so actions arrive in order. It falls back to `/api/screen` snapshots if streaming fails.
+  - **Testing safely:** `BLIP_SCREEN_TEST=1` streams ffmpeg's test pattern, and `BLIP_INPUT_DRYRUN=1` logs input instead of clicking.
+- **Voice:** Homebrew renamed `whisper-cpp` to `whisper.cpp`, and `blip.sh setup` now installs the new name. On Intel Macs, Homebrew lives in `/usr/local`. `voice.ts` gives clear errors when a tool is missing.
+- **Settings:** `settings.fullAccess` means only payments, protected files and Ask-first rules still ask (`PAYMENT_WORDS` in `permissions.ts`).
+- **Live updates:** the SSE stream sends `event: hello` on connect and `event: ping` every 20 seconds. The app polls instead if neither arrives, because some tunnels buffer the stream.
+- **Measured on the Intel test laptop over Tailscale:**
+  - the old screenshot view managed 0.4 frames per second
+  - each API call took about 1.5 seconds round trip
+  - Haiku tasks took 2 to 19 seconds
+
+## Hard audit (2026-10-18): rules that keep it healthy for weeks
+
+Fixed after a full audit. Keep these invariants:
+
+- **Never kill work in progress.**
+  - Settings changes and connector changes *retire* engines: idle ones close now, busy ones close after their task (`closeWarmSession`).
+  - The computer lock (`computer.ts`) never closes a busy engine that has Chrome open. Other bots wait (`blocker()`), and `drain()` runs on every task end and after every grant.
+  - Stop also clears that bot's queued tasks. New chat stops the bot's task and bumps `chatGeneration`, so a finishing task can't restore the old session.
+- **Lock only after allowing:** the computer is taken only once a browser or screen action is allowed (the `makeCanUseTool` wrapper), never while an approval card waits.
+- **Conversations expire:** the engine deletes transcripts after 30 days. `sessionExists()` checks `~/.claude/projects/*/<id>.jsonl` before resuming and starts fresh if it's gone.
+- **Files never corrupt:**
+  - Threads and state are written with tmp + rename.
+  - An unreadable `state.json` or thread is copied to `*.broken-<time>` instead of being silently replaced.
+  - `audit.jsonl` rotates at 5 MB.
+  - `logs/blip.log` is trimmed hourly past 20 MB.
+  - Voice recordings are deleted after transcription.
+  - `view-*` screenshots are deleted after use.
+  - `workspace/browser`, `workspace/screenshots` and `data/voice` are pruned after 7 days.
+- **Cost:** `recordCost` ignores zero totals and never re-adds a session's whole history. `contextTokens` comes from the latest main-agent call, not the result's summed usage.
+- **Security:**
+  - `isSensitive` uses realpath and lower-casing (APFS is case-insensitive). Grep, Glob and LS on a folder that *contains* a secret (`~`, ROOT) count as sensitive.
+  - `WRITE_PROTECTED_PATHS` (`workspace/.claude`, Blip's own code, LaunchAgents) always ask before writes.
+  - "Always allow" is never offered for interpreters, shells or wrappers. Key presses and page scripts are reviewed every time, and Ctrl/Cmd+Enter counts as committing.
+  - Connector read-only detection uses whole words. A removed connector gets no access.
+  - The access code is never logged; `logs/` is protected.
+  - JSON bodies are capped at 256 KB except `/api/send` and `/api/voice` (after sign-in).
+- **Routines:**
+  - At most once every 10 minutes.
+  - A routine already queued or running isn't queued again.
+  - A one-time routine missed during downtime runs late if it's under 24 hours old; otherwise a "Missed" note is posted.
+  - Deleting a bot removes its routines and their timers.
+  - A bot can remove only its own routines.
+- **Memory over 20 KB:** the prompt keeps the newest part (the tail) and asks the bot to tidy up.
+- **`blip.sh`:**
+  - `restart` rewrites the plist and reloads it (launchd only reads it on load), waiting for the old job to exit.
+  - The plist sets `LANG=en_US.UTF-8`, because without it `pbcopy` garbles non-ASCII text.
+- **App:**
+  - Screen-stream frames free their object URLs, and only the newest frame per chunk is drawn.
+  - Streams pause when the app is hidden. Only one stream runs at a time (ComputerPanel pauses while RemoteView is open).
+  - SSE reconnects itself after a 502. Live messages that arrive during a thread load are merged in. The unread count and notifications use a `seen` set.
+  - Unmounting the composer turns the mic off.
+  - Toasts appear above RemoteView. Fields are 16px on touch screens, so iOS doesn't zoom.
 
 ## How the code fits together
 
@@ -117,8 +192,8 @@ To test end to end without the UI, call `POST /api/send` with the `blip=<code>` 
 - connectors
 - a long multi-step browser task
 
-**Known gaps compared with Grok Bot** (the user declined building these for now):
-1. bots working in parallel
+**Known gaps compared with Grok Bot:**
+1. ~~bots working in parallel~~ (done)
 2. a group chat screen (delegation works through subagents, but there's no UI)
 3. routines started by events (email, webhook)
 4. masked secret requests (Keychain)

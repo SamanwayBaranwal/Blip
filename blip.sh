@@ -14,7 +14,7 @@ cd "${0:A:h}"
 DIR="$PWD"
 LABEL="com.blip.agent"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-NODE="$(command -v node)"
+NODE="$(command -v node || true)" # empty on a brand-new Mac until setup installs Node
 DOMAIN="gui/$(id -u)"
 PORT="$(grep -E '^WEB_PORT=' .env 2>/dev/null | cut -d= -f2)"; PORT="${PORT:-8787}"
 TS="$(command -v tailscale || echo /Applications/Tailscale.app/Contents/MacOS/Tailscale)"
@@ -54,7 +54,20 @@ show_link() {
   echo "Access code: $code"
 }
 
+need_node() {
+  NODE="${NODE:-$(command -v node || true)}"
+  [[ -n "$NODE" ]] || { echo "Node.js isn't installed yet. Run ./blip.sh setup first."; exit 1; }
+}
+
+# Starts the background service, waiting for an old copy to fully stop first (macOS refuses to load it twice).
+load_service() {
+  launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+  for i in {1..20}; do launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || break; sleep 0.5; done
+  launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null || { sleep 2; launchctl bootstrap "$DOMAIN" "$PLIST"; }
+}
+
 write_plist() {
+  need_node
   mkdir -p "$HOME/Library/LaunchAgents" logs
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -66,7 +79,10 @@ write_plist() {
   <array><string>$NODE</string><string>$DIR/dist/main.js</string></array>
   <key>WorkingDirectory</key><string>$DIR</string>
   <key>EnvironmentVariables</key>
-  <dict><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>LANG</key><string>en_US.UTF-8</string>
+  </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>30</integer>
@@ -88,7 +104,15 @@ case "$1" in
       exit 1
     fi
     echo "▸ Installing tools (Node.js, click control, speech-to-text, audio)…"
-    for pkg in node cliclick whisper-cpp ffmpeg; do brew list "$pkg" >/dev/null 2>&1 || brew install "$pkg"; done
+    for pkg in node cliclick ffmpeg; do brew list "$pkg" >/dev/null 2>&1 || brew install "$pkg"; done
+    # Speech-to-text. Homebrew renamed whisper-cpp to whisper.cpp; try the new name, then the old one.
+    if ! command -v whisper-cli >/dev/null; then
+      HOMEBREW_NO_AUTO_UPDATE=1 brew install whisper.cpp || HOMEBREW_NO_AUTO_UPDATE=1 brew install whisper-cpp || true
+    fi
+    if ! command -v whisper-cli >/dev/null; then
+      echo "⚠️  Speech-to-text didn't install, so voice messages won't work yet."
+      echo "   If Homebrew says a folder isn't writable, run: sudo chown -R \$(whoami) \$(brew --prefix)/share/man && brew install whisper.cpp"
+    fi
     echo "▸ Installing app packages…"
     npm ci --no-fund --no-audit
     if [[ ! -f models/ggml-small.bin ]]; then
@@ -109,15 +133,16 @@ case "$1" in
     check_env
     npm run build --silent
     write_plist
-    launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-    launchctl bootstrap "$DOMAIN" "$PLIST"
+    load_service
     echo "✅ Started. It runs in the background and starts at every login."
     sleep 3; show_link
     ;;
   restart)
+    check_location
     check_env
     npm run build --silent
-    launchctl kickstart -k "$DOMAIN/$LABEL"
+    write_plist
+    load_service # reloads the service settings too (launchd only reads them when loading)
     echo "🔄 Restarted."
     ;;
   stop)
@@ -130,6 +155,7 @@ case "$1" in
     launchctl print "$DOMAIN/$LABEL" 2>/dev/null | grep -E "state =|pid =|last exit" || echo "Not installed."
     ;;
   link)
+    need_node
     show_link
     ;;
   app)
@@ -156,6 +182,7 @@ case "$1" in
       echo "Install Tailscale first (free): https://tailscale.com/download/mac — sign in, and install it on your phone with the same account."
       exit 1
     fi
+    need_node
     "$TS" serve --bg "$PORT"
     echo "✅ Private HTTPS link is on (only your own Tailscale devices can reach it)."
     show_link

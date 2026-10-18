@@ -1,8 +1,12 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { query, type McpServerConfig, type Options, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import { query, type McpServerConfig, type Options, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
 import { personaFor, teamAgents } from "./bots.js";
 import { config } from "./config.js";
-import { makeCanUseTool } from "./permissions.js";
+import { setEngines } from "./computer.js";
+import { makeCanUseTool, type RunContext } from "./permissions.js";
 import { recordCost, spentToday, state, type BotProfile } from "./store.js";
 import { createBlipServer } from "./tools.js";
 
@@ -55,30 +59,304 @@ function connectorServers(): Record<string, McpServerConfig> {
   return servers;
 }
 
+type TurnResult = { sessionId?: string; failed: boolean; costUsd: number };
+type Turn = {
+  onStep?: (step: string) => void;
+  onPlan?: (todos: Todo[]) => void;
+  onReply: (text: string, isError: boolean, costSoFarUsd: number) => Promise<void>;
+  cost: number;
+  failed: boolean;
+  lastText: string;
+  resolve: (r: TurnResult) => void;
+  reject: (e: unknown) => void;
+  userAbort: AbortSignal;
+};
+
+// Starting the agent engine (and its browser tools) takes several seconds, so after a chat reply a bot's
+// session stays alive for a while and its next message goes straight in. Bots work in parallel, so each bot
+// can have its own warm engine; at most MAX_ENGINES stay alive, and the least recently used idle one closes first.
+const WARM_MS = 10 * 60_000;
+const MAX_ENGINES = Math.max(1, Number(process.env.MAX_PARALLEL || 3));
+
+class Session {
+  readonly inbox = new Inbox();
+  readonly abort = new AbortController();
+  readonly outstanding: string[] = [];
+  readonly ctx: RunContext;
+  readonly exited: Promise<void>;
+  private markExited!: () => void;
+  private q?: Query;
+  model: string;
+  sessionId?: string;
+  turn?: Turn;
+  alive = true;
+  /** Close as soon as the current task finishes (its settings changed, or New chat). */
+  retiring = false;
+  private turnSent = false;
+  lastUsed = Date.now();
+  private idleTimer?: NodeJS.Timeout;
+
+  constructor(
+    readonly bot: BotProfile,
+    readonly keepWarm: boolean,
+    readonly readOnly: boolean,
+    resume: string | undefined,
+    remainingBudget: number | undefined,
+    model: string,
+  ) {
+    this.model = model;
+    this.sessionId = resume;
+    this.exited = new Promise((r) => (this.markExited = r));
+    this.ctx = { bot, request: "", readOnly, taskAllows: new Set<string>(), runId: "" };
+    live.add(this);
+    void this.exited.then(() => live.delete(this));
+    // The agent's terminal never sees the Telegram token, and never inherits a parent Claude Code session's connection.
+    const env: Record<string, string | undefined> = Object.fromEntries(
+      Object.entries(process.env).filter(([key]) => key !== "TELEGRAM_BOT_TOKEN" && !/^CLAUDE|^ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)$/.test(key)),
+    );
+    if (config.anthropicKey) env.ANTHROPIC_API_KEY = config.anthropicKey;
+    const options: Options = {
+      model,
+      effort: config.effort,
+      cwd: config.workspace,
+      permissionMode: "default",
+      settingSources: ["project"], // loads workspace/CLAUDE.md and skills; ignores this Mac's personal Claude Code settings
+      systemPrompt: { type: "preset", preset: "claude_code", append: personaFor(bot, { readOnly }) },
+      agents: readOnly ? undefined : teamAgents(bot),
+      resume,
+      abortController: this.abort,
+      canUseTool: makeCanUseTool(this.ctx),
+      maxBudgetUsd: remainingBudget,
+      env,
+      mcpServers: {
+        ...connectorServers(),
+        blip: createBlipServer(bot),
+        browser: {
+          type: "stdio",
+          command: process.execPath,
+          args: [
+            config.playwrightCli, "--browser", "chrome", "--user-data-dir", config.browserProfile, "--output-dir", `${config.workspace}/browser`,
+            // Background work (check-ins, routines) uses an invisible browser so windows never pop up while you
+            // use the Mac; chats you start use a visible one you can watch. BLIP_BROWSER_HEADLESS hides it always.
+            ...(!keepWarm || process.env.BLIP_BROWSER_HEADLESS ? ["--headless"] : []),
+          ],
+        },
+      },
+      stderr: (data) => console.error(`[${bot.name}]`, data.trimEnd()),
+    };
+    void this.pump(options);
+  }
+
+  get busy() {
+    return !!this.turn;
+  }
+
+  /** Starts one exchange: the user's message, then everything until the agent has answered it. */
+  async runTurn(
+    prompt: Content,
+    request: string,
+    handlers: Pick<Turn, "onStep" | "onPlan" | "onReply">,
+    userAbort: AbortSignal,
+    run: { runId: string; model: string; onWait?: (holder: string | null) => void },
+  ): Promise<TurnResult> {
+    clearTimeout(this.idleTimer);
+    if (!this.alive) throw new Error("This bot's engine closed before it could start. Please send your message again.");
+    this.lastUsed = Date.now();
+    this.ctx.request = request;
+    this.ctx.taskAllows = new Set<string>();
+    this.ctx.runId = run.runId;
+    this.ctx.onWait = run.onWait;
+    this.turnSent = false;
+    // The turn exists (so the session counts as busy and nothing closes it) before any waiting below.
+    const result = new Promise<TurnResult>((resolve, reject) => {
+      this.turn = { ...handlers, cost: 0, failed: false, lastText: "", resolve, reject, userAbort };
+    });
+    // Smart model choice: the same warm engine can switch models between messages.
+    if (run.model !== this.model && this.q) {
+      await this.q.setModel(run.model).catch((e) => console.error(`[${this.bot.name}] setModel failed:`, e));
+      this.model = run.model;
+    }
+    if (userAbort.aborted) this.close(true);
+    else if (!this.alive) {
+      // Closed while switching models (and the engine hasn't already answered for this turn): say so.
+      const turn = this.turn;
+      this.turn = undefined;
+      turn?.reject(new Error("This bot's engine closed before it could start. Please send your message again."));
+    } else {
+      userAbort.addEventListener("abort", () => this.close(true), { once: true });
+      this.send(prompt);
+    }
+    return result;
+  }
+
+  send(content: Content, priority?: "next") {
+    const uuid = randomUUID();
+    this.turnSent = true;
+    this.outstanding.push(uuid);
+    this.inbox.push({ type: "user", uuid, message: { role: "user", content }, parent_tool_use_id: null, ...(priority ? { priority } : {}) });
+  }
+
+  /** Ends the session. Normally it shuts down gracefully (so the conversation is saved); Stop kills it at once. */
+  close(force = false) {
+    if (force && !this.abort.signal.aborted && !this.alive) this.abort.abort();
+    if (!this.alive) return;
+    this.alive = false;
+    clearTimeout(this.idleTimer);
+    this.inbox.close();
+    if (force) this.abort.abort();
+    if (sessions.get(this.bot.id) === this) sessions.delete(this.bot.id);
+    // If the engine doesn't wind down on its own, stop it.
+    setTimeout(() => this.abort.abort(), 8000).unref();
+  }
+
+  private finishTurn(result: TurnResult) {
+    const turn = this.turn;
+    this.turn = undefined;
+    this.lastUsed = Date.now();
+    turn?.resolve(result);
+    if (this.keepWarm && this.alive && !this.retiring) this.idleTimer = setTimeout(() => this.close(), WARM_MS);
+    else this.close();
+  }
+
+  private async pump(options: Options) {
+    try {
+      this.q = query({ prompt: this.inbox.messages(), options });
+      for await (const message of this.q) {
+        const turn = this.turn;
+        if (message.type === "system" && message.subtype === "init") {
+          this.sessionId = message.session_id;
+        } else if (message.type === "assistant" && turn) {
+          // The latest call's prompt size is how long the conversation is now (the result's usage adds up every step).
+          const u = message.parent_tool_use_id === null ? message.message.usage : undefined;
+          if (u) this.bot.contextTokens = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.output_tokens ?? 0);
+          for (const block of message.message.content) {
+            if (block.type === "text" && block.text.trim()) turn.lastText = block.text;
+            if (block.type !== "tool_use") continue;
+            const input = block.input as Record<string, unknown>;
+            if (block.name === "TodoWrite" && Array.isArray(input.todos)) turn.onPlan?.(input.todos as Todo[]);
+            else turn.onStep?.(stepLabel(block.name, input, message.parent_tool_use_id !== null));
+          }
+        } else if (message.type === "result") {
+          this.sessionId = message.session_id;
+          const cost = recordCost(message.session_id, message.total_cost_usd);
+          // Mark the user messages this result answered; when none are left, the turn is done.
+          const covered = message.user_message_uuids ?? (message.user_message_uuid ? [message.user_message_uuid] : []);
+          const before = this.outstanding.length;
+          for (const uuid of covered) {
+            const i = this.outstanding.indexOf(uuid);
+            if (i >= 0) this.outstanding.splice(i, 1);
+          }
+          if (this.outstanding.length === before) this.outstanding.shift();
+          if (!turn) continue;
+          turn.cost += cost;
+          if (message.subtype === "success") {
+            turn.failed = message.is_error;
+            await turn.onReply(message.result || turn.lastText, message.is_error, turn.cost);
+          } else {
+            turn.failed = true;
+            const reason = message.subtype === "error_max_budget_usd" ? "it hit today's budget limit" : message.errors.join("; ") || message.subtype;
+            await turn.onReply(`${turn.lastText}\n\nStopped early: ${reason}`.trim(), true, turn.cost);
+          }
+          turn.lastText = "";
+          if (!this.outstanding.length) this.finishTurn({ sessionId: this.sessionId, failed: turn.failed, costUsd: turn.cost });
+        }
+      }
+      // The engine ended on its own (closed while idle, or it exited after answering).
+      const turn = this.turn;
+      this.turn = undefined;
+      this.alive = false;
+      if (sessions.get(this.bot.id) === this) sessions.delete(this.bot.id);
+      if (turn && (this.outstanding.length || !this.turnSent) && !turn.userAbort.aborted) {
+        // It stopped before answering: say so instead of quietly marking the task done.
+        await turn.onReply("The engine stopped before it could answer. Please send that again.", true, turn.cost).catch(() => {});
+        turn.failed = true;
+      }
+      turn?.resolve({ sessionId: this.sessionId, failed: turn.failed || (turn.userAbort.aborted ?? false), costUsd: turn.cost });
+    } catch (error) {
+      const turn = this.turn;
+      this.turn = undefined;
+      this.alive = false;
+      this.inbox.close();
+      if (sessions.get(this.bot.id) === this) sessions.delete(this.bot.id);
+      if (turn) {
+        if (turn.userAbort.aborted) {
+          await turn.onReply("Stopped.", true, turn.cost);
+          turn.resolve({ sessionId: this.sessionId, failed: true, costUsd: turn.cost });
+        } else if (!this.outstanding.length) {
+          // After an error result the CLI exits non-zero; the user already got that error as a reply.
+          console.error(`[${this.bot.name}] agent exited after replying:`, (error as Error).message);
+          turn.resolve({ sessionId: this.sessionId, failed: true, costUsd: turn.cost });
+        } else {
+          turn.reject(error);
+        }
+      }
+    } finally {
+      this.markExited();
+    }
+  }
+}
+
+const sessions = new Map<string, Session>(); // warm engines that can take the next message, one per bot
+const live = new Set<Session>(); // every engine process still running, warm or not (until it has exited)
+
+/** Retires a bot's engine (or all engines), e.g. after its settings changed: idle ones close now, busy ones
+ *  right after their current task, so changing a setting never kills work in progress. */
+export function closeWarmSession(botId?: string) {
+  for (const s of [...live]) {
+    if (botId && s.bot.id !== botId) continue;
+    if (sessions.get(s.bot.id) === s) sessions.delete(s.bot.id); // nothing new goes into it
+    if (s.busy) s.retiring = true;
+    else s.close();
+  }
+}
+
+/** Closes a bot's engines and waits (briefly) until they have exited, so their Chrome window is gone. */
+export async function closeEngineAndWait(botId: string, onlyWithBrowser = false) {
+  const mine = [...live].filter((s) => s.bot.id === botId && (!onlyWithBrowser || s.ctx.usedComputer));
+  if (!mine.length) return;
+  for (const s of mine) s.close();
+  const allExited = Promise.all(mine.map((s) => s.exited));
+  const timedOut = await Promise.race([allExited.then(() => false), new Promise<boolean>((r) => setTimeout(() => r(true), 6000))]);
+  if (!timedOut) return;
+  // Still running: stop it hard, so its Chrome lets go of the profile before the next one starts.
+  for (const s of mine) s.close(true);
+  await Promise.race([allExited, new Promise((r) => setTimeout(r, 4000))]);
+}
+
+setEngines({
+  close: (botId) => closeEngineAndWait(botId, true),
+  // Busy with a task, after having opened the browser: closing it would kill that task.
+  busy: (botId) => [...live].some((s) => s.bot.id === botId && s.alive && s.busy && s.ctx.usedComputer),
+});
+
+/** The engine deletes conversations it hasn't touched in a while (30 days by default). Resuming one that's
+ *  gone would fail every message, so check the transcript still exists first. */
+function sessionExists(sessionId: string) {
+  const root = path.join(os.homedir(), ".claude", "projects"); // the engine's env has no CLAUDE_CONFIG_DIR (stripped above)
+  try {
+    return fs.readdirSync(root).some((dir) => fs.existsSync(path.join(root, dir, `${sessionId}.jsonl`)));
+  } catch {
+    return true; // can't tell; let the engine try
+  }
+}
+
 export function startAgent(params: {
   bot: BotProfile;
   prompt: Content;
   request: string; // plain-text version of what the user asked, for Auto Review
+  model: string; // chosen per task (see chooseModel in core.ts)
+  runId: string;
   resume?: string;
   readOnly?: boolean;
+  keepWarm?: boolean; // chats keep their engine running between messages
   abort: AbortController;
   onStep?: (step: string) => void;
   onPlan?: (todos: Todo[]) => void;
+  onWait?: (holder: string | null) => void;
   onReply: (text: string, isError: boolean, costSoFarUsd: number) => Promise<void>;
 }): AgentHandle {
-  const inbox = new Inbox();
-  const outstanding: string[] = [];
-  let request = params.request;
-  let runCost = 0;
-  const ctx = { bot: params.bot, request, readOnly: !!params.readOnly, taskAllows: new Set<string>() };
-
-  const send = (content: Content, priority?: "next") => {
-    const uuid = randomUUID();
-    outstanding.push(uuid);
-    inbox.push({ type: "user", uuid, message: { role: "user", content }, parent_tool_use_id: null, ...(priority ? { priority } : {}) });
-  };
-
-  const done = (async () => {
+  let session: Session | undefined;
+  const done = (async (): Promise<TurnResult> => {
     // With an API key, usage is billed per token and capped by the daily budget. Without one, the agent runs on
     // the Claude account signed in on this Mac (Claude plan limits apply; costs shown are estimates).
     const usingKey = !!config.anthropicKey;
@@ -87,102 +365,33 @@ export function startAgent(params: {
       await params.onReply(`Today's budget of $${config.dailyBudgetUsd} is used up. Raise DAILY_BUDGET_USD in .env or wait until tomorrow.`, true, 0);
       return { sessionId: params.resume, failed: true, costUsd: 0 };
     }
-
-    // The agent's terminal never sees the Telegram token, and never inherits a parent Claude Code session's connection.
-    const env: Record<string, string | undefined> = Object.fromEntries(
-      Object.entries(process.env).filter(([key]) => key !== "TELEGRAM_BOT_TOKEN" && !/^CLAUDE|^ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)$/.test(key)),
-    );
-    if (usingKey) env.ANTHROPIC_API_KEY = config.anthropicKey;
-    const options: Options = {
-      model: params.bot.model ?? config.model,
-      effort: config.effort,
-      cwd: config.workspace,
-      permissionMode: "default",
-      settingSources: ["project"], // loads workspace/CLAUDE.md and skills; ignores this Mac's personal Claude Code settings
-      systemPrompt: { type: "preset", preset: "claude_code", append: personaFor(params.bot, { readOnly: params.readOnly }) },
-      agents: params.readOnly ? undefined : teamAgents(params.bot),
-      resume: params.resume,
-      abortController: params.abort,
-      canUseTool: makeCanUseTool(ctx),
-      maxBudgetUsd: usingKey ? remaining : undefined,
-      env,
-      mcpServers: {
-        ...connectorServers(),
-        blip: createBlipServer(params.bot),
-        browser: {
-          type: "stdio",
-          command: process.execPath,
-          args: [config.playwrightCli, "--browser", "chrome", "--user-data-dir", config.browserProfile, "--output-dir", `${config.workspace}/browser`],
-        },
-      },
-      stderr: (data) => console.error(`[${params.bot.name}]`, data.trimEnd()),
-    };
-
-    let sessionId = params.resume;
-    let failed = false;
-    let lastText = "";
-    send(params.prompt);
-    try {
-      for await (const message of query({ prompt: inbox.messages(), options })) {
-        if (message.type === "system" && message.subtype === "init") {
-          sessionId = message.session_id;
-        } else if (message.type === "assistant") {
-          for (const block of message.message.content) {
-            if (block.type === "text" && block.text.trim()) lastText = block.text;
-            if (block.type !== "tool_use") continue;
-            const input = block.input as Record<string, unknown>;
-            if (block.name === "TodoWrite" && Array.isArray(input.todos)) params.onPlan?.(input.todos as Todo[]);
-            else params.onStep?.(stepLabel(block.name, input, message.parent_tool_use_id !== null));
-          }
-        } else if (message.type === "result") {
-          sessionId = message.session_id;
-          runCost += recordCost(message.session_id, message.total_cost_usd);
-          const u = message.usage;
-          params.bot.contextTokens = u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens + u.output_tokens;
-          // Mark the user messages this result answered; when none are left, the task is done.
-          const covered = message.user_message_uuids ?? (message.user_message_uuid ? [message.user_message_uuid] : []);
-          const before = outstanding.length;
-          for (const uuid of covered) {
-            const i = outstanding.indexOf(uuid);
-            if (i >= 0) outstanding.splice(i, 1);
-          }
-          if (outstanding.length === before) outstanding.shift();
-          if (message.subtype === "success") {
-            failed = message.is_error;
-            await params.onReply(message.result || lastText, message.is_error, runCost);
-          } else {
-            failed = true;
-            const reason = message.subtype === "error_max_budget_usd" ? "it hit today's budget limit" : message.errors.join("; ") || message.subtype;
-            await params.onReply(`${lastText}\n\n⚠️ Stopped early: ${reason}`.trim(), true, runCost);
-          }
-          lastText = "";
-          if (!outstanding.length) inbox.close();
-        }
+    const keepWarm = !!params.keepWarm && !params.readOnly && !usingKey; // a budgeted key session needs a fresh budget cap
+    const existing = sessions.get(params.bot.id);
+    const reusable = keepWarm && existing?.alive && !existing.busy && !existing.retiring && !existing.readOnly && (!params.resume || existing.sessionId === params.resume);
+    if (reusable) {
+      session = existing!;
+    } else {
+      // Wait for the bot's old engine to exit first, so its browser releases the shared profile.
+      if ([...live].some((s) => s.bot.id === params.bot.id)) await closeEngineAndWait(params.bot.id);
+      // Keep the number of running engines in check: close the least recently used idle one.
+      const idle = [...sessions.values()].filter((s) => !s.busy).sort((a, b) => a.lastUsed - b.lastUsed);
+      if (sessions.size >= MAX_ENGINES && idle[0]) idle[0].close();
+      let resume = params.resume;
+      if (resume && !sessionExists(resume)) {
+        console.error(`[${params.bot.name}] conversation ${resume} no longer exists; starting a fresh one (memory is kept)`);
+        resume = undefined;
       }
-    } catch (error) {
-      const answeredEverything = inbox.closed && !outstanding.length;
-      inbox.close();
-      if (params.abort.signal.aborted) {
-        await params.onReply("⏹ Stopped.", true, runCost);
-        return { sessionId, failed: true, costUsd: runCost };
-      }
-      // After an error result the CLI exits non-zero; the user already got that error as a reply.
-      if (answeredEverything) {
-        console.error(`[${params.bot.name}] agent exited after replying:`, (error as Error).message);
-        return { sessionId, failed: true, costUsd: runCost };
-      }
-      throw error;
+      session = new Session(params.bot, keepWarm, !!params.readOnly, resume, usingKey ? remaining : undefined, params.model);
+      if (keepWarm) sessions.set(params.bot.id, session);
     }
-    inbox.close();
-    return { sessionId, failed, costUsd: runCost };
+    return session.runTurn(params.prompt, params.request, params, params.abort.signal, { runId: params.runId, model: params.model, onWait: params.onWait });
   })();
 
   return {
     steer(textMessage: string) {
-      if (inbox.closed) return false;
-      request = `${request}\n\nThen the user added: ${textMessage}`;
-      ctx.request = request;
-      send(`[Message from the user while you're working — take it into account now]\n${textMessage}`, "next");
+      if (!session?.alive || !session.busy) return false;
+      session.ctx.request = `${session.ctx.request}\n\nThen the user added: ${textMessage}`;
+      session.send(`[Message from the user while you're working — take it into account now]\n${textMessage}`, "next");
       return true;
     },
     done,

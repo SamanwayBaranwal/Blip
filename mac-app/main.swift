@@ -91,7 +91,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
     // MARK: navigation, links and downloads
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        let e = error as NSError
+        // A download or a cancelled load also "fails" the navigation; only a real connection error means offline.
+        if (e.domain == "WebKitErrorDomain" && e.code == 102) || e.code == NSURLErrorCancelled { return }
         if webView == self.webView { showOffline() }
+    }
+
+    /// macOS can kill the page's process under memory pressure; reload instead of staying blank.
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        if webView == self.webView { load() } else { webView.reload() }
     }
 
     func isLocal(_ url: URL) -> Bool { url.host == "localhost" || url.host == "127.0.0.1" }
@@ -164,6 +172,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
         win.center()
         win.makeKeyAndOrderFront(nil)
         extraWindows.append(win)
+        // Let a closed preview window (and its page) go, instead of keeping every one alive forever.
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: win, queue: .main) {
+            [weak self] note in
+            guard let closed = note.object as? NSWindow else { return }
+            closed.contentView = nil
+            self?.extraWindows.removeAll { $0 === closed }
+        }
         return child
     }
 
@@ -221,7 +236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, WKNavigationDelegate, 
             let content = UNMutableNotificationContent()
             content.title = data["title"] as? String ?? "Blip"
             content.body = data["body"] as? String ?? ""
-            content.sound = .default
+            content.sound = (data["silent"] as? Bool ?? false) ? nil : .default  // the bot's Quiet setting
             UNUserNotificationCenter.current().add(
                 UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
         default:

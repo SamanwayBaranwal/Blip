@@ -3,6 +3,7 @@ import path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { config } from "./config.js";
+import { screenPoints as cachedScreenPoints } from "./screen.js";
 
 // Native Mac control ("computer use") with screencapture + cliclick. Coordinates the model sees are
 // pixels in the downscaled screenshot; we convert them to screen points before clicking.
@@ -11,13 +12,8 @@ const CLICLICK = ["/opt/homebrew/bin/cliclick", "/usr/local/bin/cliclick"].find(
 const SHOT_MAX = 1280;
 let scale = 1;
 
-async function screenPoints(): Promise<{ width: number; height: number }> {
-  const { stdout } = await run("/usr/bin/osascript", [
-    "-l", "JavaScript", "-e", 'ObjC.import("AppKit"); var f = $.NSScreen.mainScreen.frame; f.size.width + "x" + f.size.height',
-  ]);
-  const [width, height] = stdout.trim().split("x").map(Number);
-  return { width: width!, height: height! };
-}
+// Screen size in points, cached for a minute (asking macOS on every frame made the live view slow).
+const screenPoints = cachedScreenPoints;
 
 async function capture(file: string, args: string[]) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -83,12 +79,20 @@ export async function click(x: number, y: number, kind: "left" | "right" | "doub
 }
 
 export async function typeText(text: string) {
+  if (process.env.BLIP_INPUT_DRYRUN) return void console.log("[input] type", JSON.stringify(text));
   // cliclick types ASCII reliably; for anything else paste via the clipboard.
   if (/^[\x20-\x7E]*$/.test(text)) {
     await run(CLICLICK, ["-e", "10", `t:${text}`]);
   } else {
-    await run("/bin/sh", ["-c", 'printf %s "$1" | pbcopy', "sh", text]);
+    // pbcopy needs a UTF-8 locale or "é", "’" and emoji come out garbled. The old clipboard is put back after,
+    // so typed text (which may be private) isn't left on it.
+    const env = { ...process.env, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" };
+    const previous = await run("/usr/bin/pbpaste", [], { env }).then((r) => r.stdout, () => undefined);
+    await run("/bin/sh", ["-c", 'printf %s "$1" | pbcopy', "sh", text], { env });
     await pressKeys("cmd+v");
+    setTimeout(() => {
+      void run("/bin/sh", ["-c", 'printf %s "$1" | pbcopy', "sh", previous ?? ""], { env }).catch(() => {});
+    }, 600);
   }
 }
 
@@ -97,6 +101,7 @@ const ALIASES: Record<string, string> = { command: "cmd", control: "ctrl", optio
 
 /** "cmd+space", "return", "cmd+shift+4", "arrow-down" */
 export async function pressKeys(combo: string) {
+  if (process.env.BLIP_INPUT_DRYRUN) return void console.log("[input] key", combo);
   const parts = combo.toLowerCase().split("+").map((p) => ALIASES[p.trim()] ?? p.trim()).filter(Boolean);
   const mods = parts.filter((p) => MODIFIERS.has(p));
   const key = parts.find((p) => !MODIFIERS.has(p));

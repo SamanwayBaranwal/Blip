@@ -17,9 +17,11 @@ const text =(t: string, isError = false) => ({ content: [{ type: "text" as const
 
 async function screenForModel(note: string) {
   const shot = await mac.screenshotForModel();
+  const data = fs.readFileSync(shot.file).toString("base64");
+  fs.rmSync(shot.file, { force: true }); // the model has it now; thousands of these would pile up otherwise
   return {
     content: [
-      { type: "image" as const, data: fs.readFileSync(shot.file).toString("base64"), mimeType: "image/jpeg" },
+      { type: "image" as const, data, mimeType: "image/jpeg" },
       { type: "text" as const, text: `${note}Screenshot is ${shot.width}x${shot.height} px; use these pixel coordinates with mac_click.` },
     ],
   };
@@ -116,9 +118,14 @@ export function createBlipServer(bot: BotProfile) {
         },
       ),
       tool("list_routines", "List all scheduled routines.", {}, async () => text(describeRoutines())),
-      tool("remove_routine", "Delete a scheduled routine by id.", { id: z.string() }, async ({ id }) =>
-        removeRoutine(id) ? text(`Removed routine ${id}.`) : text(`No routine with id ${id}.`, true),
-      ),
+      tool("remove_routine", "Delete one of your own scheduled routines by id.", { id: z.string() }, async ({ id }) => {
+        const routine = state.routines.find((r) => r.id === id);
+        if (!routine) return text(`No routine with id ${id}.`, true);
+        // Another bot's routines are the user's to remove (in the app), so an injected instruction can't wipe them.
+        if (routine.botId !== bot.id) return text(`"${routine.name}" belongs to another bot. Ask the user to remove it in the app (Routines).`, true);
+        removeRoutine(id);
+        return text(`Removed routine ${id}.`);
+      }),
 
       // ---- Skills ----
       tool(

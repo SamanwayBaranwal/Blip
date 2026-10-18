@@ -1,3 +1,4 @@
+import os from "node:os";
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { query } from "@anthropic-ai/claude-agent-sdk";
@@ -38,7 +39,20 @@ const PRICES: Record<string, [number, number]> = {
 };
 
 /** Without an API key, the reviewer runs on the Mac's Claude login through the Agent SDK instead. */
-async function reviewWithPlan(content: string): Promise<ReviewResult> {
+async function reviewWithPlan(content: string, signal?: AbortSignal): Promise<ReviewResult> {
+  // A review that hangs mustn't hold up the task forever, and Stop cancels it.
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), 90_000);
+  signal?.addEventListener("abort", () => abort.abort(), { once: true });
+  try {
+    return await planReview(content, abort);
+  } finally {
+    clearTimeout(timer);
+    abort.abort(); // ends the review engine if it's still around
+  }
+}
+
+async function planReview(content: string, abort: AbortController): Promise<ReviewResult> {
   for await (const m of query({
     prompt: content,
     options: {
@@ -47,6 +61,9 @@ async function reviewWithPlan(content: string): Promise<ReviewResult> {
       systemPrompt: POLICY,
       settingSources: [],
       maxTurns: 3,
+      tools: [],
+      cwd: os.tmpdir(),
+      abortController: abort,
       outputFormat: { type: "json_schema", schema: z.toJSONSchema(Verdict) as Record<string, unknown> },
       canUseTool: async () => ({ behavior: "deny", message: "No tools during review." }),
       env: Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^CLAUDE|^ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)$/.test(k))),
@@ -60,16 +77,17 @@ async function reviewWithPlan(content: string): Promise<ReviewResult> {
   return { verdict: "ask", reason: "Auto Review couldn't assess this." };
 }
 
-export async function autoReview(request: string, botName: string, action: string): Promise<ReviewResult> {
+export async function autoReview(request: string, botName: string, action: string, signal?: AbortSignal): Promise<ReviewResult> {
   if (!config.anthropicKey) {
     const content = `<owner_request>\n${request.slice(0, 4000)}\n</owner_request>\n\n<proposed_action agent="${botName}">\n${action.slice(0, 4000)}\n</proposed_action>`;
-    return reviewWithPlan(content).catch((error) => {
+    return reviewWithPlan(content, signal).catch((error) => {
       console.error("Auto Review failed:", error);
       return { verdict: "ask" as const, reason: "Auto Review was unavailable." };
     });
   }
   try {
-    const response = await reviewer().messages.parse({
+    const response = await reviewer().messages.parse(
+      {
       model: config.reviewModel,
       max_tokens: 4000,
       system: POLICY,
@@ -80,7 +98,9 @@ export async function autoReview(request: string, botName: string, action: strin
           content: `<owner_request>\n${request.slice(0, 4000)}\n</owner_request>\n\n<proposed_action agent="${botName}">\n${action.slice(0, 4000)}\n</proposed_action>`,
         },
       ],
-    });
+      },
+      { signal, timeout: 90_000 },
+    );
     const [inPrice, outPrice] = PRICES[config.reviewModel] ?? [4, 20];
     addSpend((response.usage.input_tokens * inPrice + response.usage.output_tokens * outPrice) / 1e6);
     // A refusal or unparseable answer means the reviewer wasn't comfortable: let the human decide.

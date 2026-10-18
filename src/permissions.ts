@@ -1,9 +1,11 @@
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { CanUseTool, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
-import { config, SENSITIVE_PATHS } from "./config.js";
+import { config, SENSITIVE_PATHS, WRITE_PROTECTED_PATHS } from "./config.js";
 import { askCard } from "./cards.js";
+import { acquireComputer } from "./computer.js";
 import type { CardButton } from "./hub.js";
 import { autoReview } from "./review.js";
 import { audit, save, state, type BotProfile, type Rule } from "./store.js";
@@ -34,9 +36,12 @@ const INTERACTIVE = new Set([
 // Built-in guard, enforced in code rather than by prompt: actions that look like sending, paying, deleting or
 // committing always come to the user, whatever the bot was told and whatever rules say.
 const COMMIT_WORDS = /\b(send|post|publish|submit|reply|forward|pay|payment|purchase|buy|order|checkout|check out|place order|confirm|delete|remove|cancel|unsubscribe|accept|agree|transfer|withdraw|book|reserve|sign up|subscribe|share)\b/i;
+const PAYMENT_WORDS = /\b(pay|payment|purchase|buy|order|checkout|check out|place order|transfer|withdraw|subscribe|card number|cvv)\b/i;
 const READ_TOOLS = new Set(["Read", "Glob", "Grep", "LS"]);
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
-const READ_VERB = /^(get|list|search|read|fetch|find|query|describe|view|show|lookup|retrieve|count|check)/i;
+// Whole words only: "checkout_cart" or "get_or_create_order" are not reads.
+const READ_VERB = /^(get|list|search|read|fetch|find|query|describe|view|show|lookup|retrieve|count)([_\-.]|[A-Z]|$)/;
+const WRITE_VERB = /(create|update|delete|remove|send|post|write|set|add|cancel|pay|order|checkout|book|submit|move|archive|modify|edit|insert|upsert)/i;
 const APPROVAL_TIMEOUT_MS = 3 * 60 * 60_000;
 const REMINDERS_MS = [10 * 60_000, 60 * 60_000];
 
@@ -46,7 +51,18 @@ export type RunContext = {
   readOnly: boolean;
   /** Approvals granted with "Allow for this task": they end with the task. */
   taskAllows: Set<string>;
+  /** Identifies the running task, for taking turns on the browser and screen. */
+  runId: string;
+  /** Tells the task's progress line that it's waiting for another bot to finish with the computer (null: got it). */
+  onWait?: (holderName: string | null) => void;
+  /** Set once this engine has used the browser or screen (its Chrome may still be open). */
+  usedComputer?: boolean;
 };
+
+/** Tools that drive the shared browser or the Mac's screen, so only one task at a time may use them. */
+const usesComputer = (toolName: string) =>
+  (toolName.startsWith("mcp__browser__") || toolName.startsWith("mcp__blip__mac_") || toolName === "mcp__blip__request_takeover") &&
+  toolName !== "mcp__blip__mac_screenshot";
 
 function resolvePath(p: unknown): string | undefined {
   if (typeof p !== "string" || !p) return undefined;
@@ -59,7 +75,31 @@ export function inside(child: string, parent: string) {
   return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
-export const isSensitive = (p: string) => SENSITIVE_PATHS.some((s) => inside(p, s));
+/** Real, lower-cased path: macOS disks ignore case (~/.SSH is ~/.ssh) and symlinks can point anywhere. */
+function canonical(p: string) {
+  let real = p;
+  try {
+    real = fs.realpathSync.native(p);
+  } catch {
+    // doesn't exist yet: resolve the folder it would be created in
+    try {
+      real = path.join(fs.realpathSync.native(path.dirname(p)), path.basename(p));
+    } catch {}
+  }
+  return real.toLowerCase();
+}
+// Secrets live outside the workspace; searching a folder that contains one (like ~) counts as touching it.
+const SECRET_PATHS = SENSITIVE_PATHS.filter((s) => !inside(s, config.workspace));
+
+export const isSensitive = (p: string, opts: { searchesFolder?: boolean } = {}) => {
+  const c = canonical(p);
+  if (SENSITIVE_PATHS.some((s) => inside(c, canonical(s)))) return true;
+  return !!opts.searchesFolder && SECRET_PATHS.some((s) => inside(canonical(s), c));
+};
+const isWriteProtected = (p: string) => {
+  const c = canonical(p);
+  return WRITE_PROTECTED_PATHS.some((s) => inside(c, canonical(s)));
+};
 
 /** The argument an "allow" rule matches against: the command, file path, URL, or nothing. */
 function mainArg(toolName: string, input: Record<string, unknown>): string {
@@ -67,14 +107,21 @@ function mainArg(toolName: string, input: Record<string, unknown>): string {
 }
 
 const SIMPLE_COMMAND = (cmd: string) => !/[;&|`<>$\n]/.test(cmd);
-const NEVER_ALWAYS = ["sudo", "rm", "su", "curl", "wget", "osascript", "security", "dd", "diskutil", "launchctl", "chmod", "chown"];
+// Commands that can run anything (interpreters, shells, wrappers) or destroy things never get a standing rule:
+// "always allow python3" would also allow `python3 -c "<anything>"`.
+const NEVER_ALWAYS = [
+  "sudo", "rm", "su", "curl", "wget", "osascript", "security", "dd", "diskutil", "launchctl", "chmod", "chown",
+  "bash", "sh", "zsh", "fish", "python", "python3", "node", "perl", "ruby", "php", "deno", "bun", "env", "xargs",
+  "find", "git", "npm", "npx", "pnpm", "yarn", "pip", "pip3", "brew", "open", "command", "exec", "eval", "nice", "time",
+  "nohup", "timeout", "watch", "ssh", "scp", "rsync", "mv", "cp", "ln", "kill", "killall", "pkill", "defaults", "crontab", "tee",
+];
 
 /** The rule an "Always allow" tap would save, or undefined if this action is too risky to auto-approve forever. */
 function proposedAllowRule(toolName: string, input: Record<string, unknown>): Omit<Rule, "id"> | undefined {
   if (toolName === "Bash") {
     const cmd = String(input.command ?? "").trim();
     const word = cmd.split(/\s+/)[0];
-    if (!word || !SIMPLE_COMMAND(cmd) || NEVER_ALWAYS.includes(word)) return undefined;
+    if (!word || !SIMPLE_COMMAND(cmd) || NEVER_ALWAYS.includes(word) || word.includes("/")) return undefined;
     return { effect: "allow", tool: "Bash", match: `${word} ` };
   }
   if (WRITE_TOOLS.has(toolName) || INTERACTIVE.has(toolName) || toolName === "mcp__blip__add_connector") return undefined;
@@ -82,8 +129,14 @@ function proposedAllowRule(toolName: string, input: Record<string, unknown>): Om
   return { effect: "allow", tool: toolName };
 }
 
+// Keystrokes and page scripts can do anything (Ctrl+Enter sends an email), so each one is reviewed on its own.
+const NO_TASK_ALLOW = new Set([
+  "mcp__browser__browser_press_key", "mcp__browser__browser_evaluate", "mcp__browser__browser_run_code_unsafe", "mcp__blip__mac_key",
+]);
+
 /** Key for "Allow for this task": per tool, and per command name for Bash. */
 function taskKey(toolName: string, input: Record<string, unknown>) {
+  if (NO_TASK_ALLOW.has(toolName)) return undefined;
   if (toolName !== "Bash") return toolName;
   const cmd = String(input.command ?? "").trim();
   return SIMPLE_COMMAND(cmd) ? `Bash:${cmd.split(/\s+/)[0]}` : undefined;
@@ -96,7 +149,7 @@ function matchingRule(effect: Rule["effect"], toolName: string, input: Record<st
   return state.rules.find((r) => {
     if (r.effect !== effect || !toolMatches(r.tool, toolName)) return false;
     if (!r.match) return true;
-    if (effect === "ask") return summary.toLowerCase().includes(r.match.toLowerCase());
+    if (effect === "ask") return `${summary}\n${JSON.stringify(input)}`.toLowerCase().includes(r.match.toLowerCase());
     const arg = mainArg(toolName, input);
     if (toolName === "Bash" && !SIMPLE_COMMAND(arg)) return false; // "ls && rm -rf x" can't ride on "ls"
     return (arg + " ").startsWith(r.match);
@@ -184,6 +237,30 @@ async function takeoverCard(input: Record<string, unknown>, bot: BotProfile, sig
 }
 
 export function makeCanUseTool(ctx: RunContext): CanUseTool {
+  const decide = decider(ctx);
+  return async (toolName, input, options): Promise<PermissionResult> => {
+    const decision = await decide(toolName, input, options);
+    // Take turns on the browser and screen with other bots working in parallel. Only once the action is
+    // allowed: a bot waiting hours on an approval card mustn't hold the computer meanwhile.
+    if (decision.behavior !== "allow" || !usesComputer(toolName)) return decision;
+    let waited = false;
+    try {
+      await acquireComputer({ runId: ctx.runId, botId: ctx.bot.id, botName: ctx.bot.name }, options.signal, (who) => {
+        waited = true;
+        ctx.onWait?.(who);
+      });
+    } catch {
+      return { behavior: "deny", message: "Stopped while waiting for the computer." };
+    }
+    if (waited) ctx.onWait?.(null);
+    ctx.usedComputer = true;
+    return decision;
+  };
+}
+
+type Decide = (...args: Parameters<CanUseTool>) => Promise<PermissionResult>;
+
+function decider(ctx: RunContext): Decide {
   return async (toolName, input, { signal, agentID }): Promise<PermissionResult> => {
     const summary = describeAction(toolName, input);
     const who = agentID ? `${ctx.bot.name} (via teammate)` : ctx.bot.name;
@@ -198,17 +275,19 @@ export function makeCanUseTool(ctx: RunContext): CanUseTool {
       return { behavior: "deny", message };
     };
 
+    const searchesFolder = toolName === "Grep" || toolName === "Glob" || toolName === "LS";
     const target = READ_TOOLS.has(toolName) || WRITE_TOOLS.has(toolName)
       ? resolvePath(input.file_path ?? input.notebook_path ?? input.path) ?? config.workspace
       : undefined;
     const [prefix, server, ...rest] = toolName.split("__");
     const connectorName = prefix === "mcp" && server && !["blip", "browser"].includes(server) ? server : undefined;
-    const connectorReadOnly = connectorName ? READ_VERB.test(rest.join("__")) : false;
+    const connectorTool = rest.join("__");
+    const connectorReadOnly = connectorName ? READ_VERB.test(connectorTool) && !WRITE_VERB.test(connectorTool) : false;
 
     // 1. Read-only runs (proactive check-ins) can look but never touch.
     if (ctx.readOnly) {
       if (READ_ONLY_SAFE.has(toolName) || connectorReadOnly) return allow("auto (read-only run)");
-      if (target && READ_TOOLS.has(toolName) && !isSensitive(target)) return allow("auto (read-only run)");
+      if (target && READ_TOOLS.has(toolName) && !isSensitive(target, { searchesFolder })) return allow("auto (read-only run)");
       return deny("This is a read-only check-in. Don't change anything; suggest it with the suggest tool instead.");
     }
 
@@ -218,17 +297,26 @@ export function makeCanUseTool(ctx: RunContext): CanUseTool {
 
     // 3. Connector access level (Muse-style read-only / full access per app).
     if (connectorName) {
-      const access = state.connectors[connectorName]?.access ?? "full";
+      // A connector that was removed (but is still loaded in a running engine) gets no access at all.
+      const access = Object.hasOwn(state.connectors, connectorName) ? state.connectors[connectorName]!.access : "off";
       if (access === "off") return deny(`The ${connectorName} connector is turned off.`);
       if (access === "read" && !connectorReadOnly) return deny(`The ${connectorName} connector is read-only. Ask the user to give it full access with /connectors.`);
     }
 
-    const sensitive = target ? isSensitive(target) : false;
+    const sensitive = target ? isSensitive(target, { searchesFolder }) || (WRITE_TOOLS.has(toolName) && isWriteProtected(target)) : false;
     const askFirst = matchingRule("ask", toolName, input, summary);
     // Commit-like clicks, keystrokes and connector writes ("Send", "Pay", "Delete", "Accept offer") always ask.
     const actsAsUser = INTERACTIVE.has(toolName) || (connectorName !== undefined && !connectorReadOnly);
-    const committing = actsAsUser && COMMIT_WORDS.test(summary);
+    // A key combo with Enter plus a modifier (Ctrl/Cmd+Enter) sends in most mail and chat apps.
+    const sendKey = /(ctrl|control|cmd|command|meta)\s*\+\s*(enter|return)/i.test(String(input.key ?? input.keys ?? ""));
+    const committing = actsAsUser && (COMMIT_WORDS.test(summary) || sendKey);
     const key = taskKey(toolName, input);
+
+    // Full access (the user's choice in Settings): everything runs without asking except payments,
+    // protected files and the user's own Ask-first rules.
+    if (state.settings.fullAccess && !askFirst && !sensitive && !(actsAsUser && PAYMENT_WORDS.test(summary)) && !PAYMENT_WORDS.test(toolName)) {
+      return allow("full access");
+    }
 
     // 4. Things that are safe by nature run automatically, unless an "Ask first" rule says otherwise.
     if (!askFirst && !sensitive && !committing) {
@@ -243,7 +331,8 @@ export function makeCanUseTool(ctx: RunContext): CanUseTool {
     let reviewNote = "";
     let risky = sensitive || committing;
     if (!askFirst && !sensitive && !committing && state.settings.autoReview && toolName !== "mcp__blip__add_connector") {
-      const review = await autoReview(ctx.request, ctx.bot.name, summary);
+      const review = await autoReview(ctx.request, ctx.bot.name, summary, signal);
+      if (signal.aborted) return deny("The task was stopped.");
       if (review.verdict === "allow") return allow("auto-review", { reason: review.reason });
       reviewNote = `\n\n${review.verdict === "deny" ? "Auto Review: high risk" : "Auto Review"} — ${review.reason}`;
       risky = review.verdict === "deny";

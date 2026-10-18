@@ -7,11 +7,12 @@ import { state } from "./store.js";
 // from the app or from Telegram, whichever is first.
 
 export type CardAnswer = { value: string; body?: string };
-type Pending = { botId: string; resolve: (a: CardAnswer, note?: string) => void };
+type Pending = { botId: string; type: CardView["type"]; resolve: (a: CardAnswer, note?: string) => void };
 const pending = new Map<string, Pending>();
 
-export function pendingCards() {
-  return pending.size;
+/** Cards a task is paused on (approvals, drafts, takeovers). Suggestions don't pause anything. */
+export function pendingCards(botId?: string) {
+  return [...pending.values()].filter((p) => p.type !== "suggestion" && (!botId || p.botId === botId)).length;
 }
 
 export async function askCard(input: {
@@ -27,6 +28,7 @@ export async function askCard(input: {
   signal?: AbortSignal;
   remindAfterMs?: number[];
 }): Promise<CardAnswer> {
+  if (input.signal?.aborted) return { value: input.timeoutValue }; // the task was stopped before the card went out
   const msg = addMessage({
     botId: input.botId,
     role: "bot",
@@ -54,7 +56,7 @@ export async function askCard(input: {
     };
     const timer = setTimeout(() => finish({ value: input.timeoutValue }, true), input.timeoutMs);
     input.signal?.addEventListener("abort", () => finish({ value: input.timeoutValue }, true), { once: true });
-    pending.set(msg.id, { botId: input.botId, resolve: (a) => finish(a) });
+    pending.set(msg.id, { botId: input.botId, type: input.type, resolve: (a) => finish(a) });
   });
 }
 

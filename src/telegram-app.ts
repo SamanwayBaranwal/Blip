@@ -1,10 +1,12 @@
+import fs from "node:fs";
 import path from "node:path";
 import { InlineKeyboard } from "grammy";
+import { closeWarmSession } from "./agent.js";
 import { activeBot, getBot } from "./bots.js";
 import { answerCard, editDraft, isPending } from "./cards.js";
 import { config } from "./config.js";
-import { duration, giveFeedback, handleUserMessage, runtime, stopCurrent } from "./core.js";
-import { events, type Msg } from "./hub.js";
+import { duration, freshChat, giveFeedback, handleUserMessage, runtime, stopCurrent } from "./core.js";
+import { events, findMessage, stateChanged, type Msg } from "./hub.js";
 import { screenshotForPhone } from "./mac.js";
 import { save, spentToday, state } from "./store.js";
 import { bot, downloadToInbox, sendFile, sendText, sendVoice } from "./telegram.js";
@@ -14,6 +16,14 @@ import { speak, transcribe } from "./voice.js";
 
 const mirrored = new Map<string, number>(); // hub message id → Telegram message id
 const lastEdit = new Map<string, number>();
+/** Keeps the two maps from growing forever on an always-on Mac: only recent messages can still change. */
+function forgetOld() {
+  for (const map of [mirrored, lastEdit] as Map<string, number>[]) {
+    if (map.size <= 1500) continue;
+    for (const key of [...map.keys()].slice(0, map.size - 1000)) map.delete(key);
+  }
+}
+const stopButton = (botId: string) => new InlineKeyboard().text("Stop", `stop:${botId}`);
 let textCapture: ((text: string) => void) | undefined;
 
 const nameTag = (botId: string) => {
@@ -47,20 +57,31 @@ async function mirror(m: Msg) {
     const keyboard = m.role === "bot" && !m.meta?.error && m.meta?.costUsd !== undefined ? new InlineKeyboard().text("👍", `fb:up:${m.botId}:${m.id}`).text("👎", `fb:down:${m.botId}:${m.id}`) : undefined;
     if (m.text?.trim()) mirrored.set(m.id, (await sendText(`${head}${m.text}${foot}`, { silent: b?.quiet, keyboard })) ?? 0);
     for (const f of m.files ?? []) await sendFile(path.join(config.workspace, f)).catch((e) => console.error("Telegram file failed:", e));
-    if (m.meta?.voice && m.text?.trim() && !m.meta.error) await sendVoice(await speak(m.text)).catch(() => {});
+    if (m.meta?.voice && m.text?.trim() && !m.meta.error) {
+      const ogg = await speak(m.text).catch(() => undefined);
+      if (ogg) await sendVoice(ogg).catch(() => {});
+      if (ogg) fs.rmSync(ogg, { force: true });
+    }
+    forgetOld();
   } else if (m.kind === "run") {
     const done = !["running", "waiting"].includes(m.run!.status);
     if (tgId === undefined) {
       if (done) return;
       mirrored.set(m.id, 0);
-      const sent = await bot.api.sendMessage(config.ownerId, renderRun(m), { disable_notification: true, reply_markup: new InlineKeyboard().text("⏹ Stop", "stop") });
+      const sent = await bot.api.sendMessage(config.ownerId, renderRun(m), { disable_notification: true, reply_markup: stopButton(m.botId) });
       mirrored.set(m.id, sent.message_id);
+      // A quick task can finish while this was sending: don't leave its progress message behind.
+      const now = findMessage(m.botId, m.id)?.run?.status;
+      if (now && !["running", "waiting"].includes(now)) {
+        mirrored.set(m.id, -1);
+        await bot.api.deleteMessage(config.ownerId, sent.message_id).catch(() => {});
+      }
     } else if (tgId && done) {
       mirrored.set(m.id, -1);
       await bot.api.deleteMessage(config.ownerId, tgId).catch(() => {});
     } else if (tgId > 0 && Date.now() - (lastEdit.get(m.id) ?? 0) > 2500) {
       lastEdit.set(m.id, Date.now());
-      await bot.api.editMessageText(config.ownerId, tgId, renderRun(m), { reply_markup: new InlineKeyboard().text("⏹ Stop", "stop") }).catch(() => {});
+      await bot.api.editMessageText(config.ownerId, tgId, renderRun(m), { reply_markup: stopButton(m.botId) }).catch(() => {});
     }
   } else if (m.kind === "card") {
     const c = m.card!;
@@ -74,6 +95,11 @@ async function mirror(m: Msg) {
       if (c.type === "draft") keyboard.text("✏️ Edit", `edit:${m.id}`);
       const sent = await bot.api.sendMessage(config.ownerId, renderCard(m), { reply_markup: keyboard });
       mirrored.set(m.id, sent.message_id);
+      const latest = findMessage(m.botId, m.id);
+      if (latest?.card && latest.card.status !== "pending") {
+        mirrored.set(m.id, -1);
+        await bot.api.editMessageText(config.ownerId, sent.message_id, renderCard(latest)).catch(() => {});
+      }
     } else if (tgId > 0 && c.status !== "pending") {
       mirrored.set(m.id, -1);
       await bot.api.editMessageText(config.ownerId, tgId, renderCard(m)).catch(() => {});
@@ -101,14 +127,16 @@ export async function startTelegram() {
     await ctx.reply("Who do you want to talk to?", { reply_markup: keyboard });
   });
   bot.command("new", async (ctx) => {
-    activeBot().sessionId = undefined;
+    stopCurrent(activeBot().id);
+    freshChat(activeBot());
+    closeWarmSession(activeBot().id);
     save();
     await ctx.reply(`🆕 Fresh conversation with ${activeBot().name}. Memory is kept.`);
   });
   bot.command("stop", async (ctx) => void (await ctx.reply(stopCurrent() ? "⏹ Stopping…" : "Nothing is running.")));
   bot.command("status", async (ctx) => {
     const r = runtime();
-    const cur = r.current ? `🔄 ${getBot(r.current.botId)?.name}: ${r.current.label}\n   ${r.current.step}` : "😴 Idle";
+    const cur = r.running.length ? r.running.map((x) => `${getBot(x.botId)?.name}: ${x.label}\n   ${x.step}`).join("\n") : "Idle";
     await ctx.reply(`${cur}${r.queued.length ? `\n📥 ${r.queued.length} queued` : ""}\n💵 Today $${spentToday().toFixed(2)} of $${config.dailyBudgetUsd}`);
   });
   bot.command("screen", async (ctx) => {
@@ -123,10 +151,11 @@ export async function startTelegram() {
     const [kind, a, b, c] = ctx.callbackQuery.data.split(":");
     let note: string | undefined;
     if (kind === "c") note = answerCard(a!, b!) ? undefined : "This already expired.";
-    else if (kind === "stop") note = stopCurrent() ? "Stopping…" : "Nothing is running.";
+    else if (kind === "stop") note = stopCurrent(a || undefined) ? "Stopping…" : "Nothing is running.";
     else if (kind === "use" && getBot(a)) {
       state.activeBotId = a;
       save();
+      stateChanged();
       note = `Now talking to ${getBot(a)!.name}`;
     } else if (kind === "edit" && isPending(a!)) {
       await ctx.reply("✏️ Send me the new text for this draft:");
@@ -157,8 +186,11 @@ export async function startTelegram() {
 
   bot.on(["message:voice", "message:audio"], async (ctx) => {
     const media = ctx.message.voice ?? ctx.message.audio!;
+    let saved: string | undefined;
     try {
-      const text = await transcribe(await downloadToInbox(media.file_id, ctx.message.voice ? "voice.ogg" : ctx.message.audio?.file_name));
+      saved = await downloadToInbox(media.file_id, ctx.message.voice ? "voice.ogg" : ctx.message.audio?.file_name);
+      const text = await transcribe(saved);
+      if (ctx.message.voice) fs.rmSync(saved, { force: true }); // a voice note isn't needed once it's text
       if (!text) return void (await ctx.reply("🎙 I couldn't hear anything in that."));
       await ctx.reply(`🎙 "${text}"`);
       handleUserMessage(text, { voice: true, source: "telegram" });
@@ -183,13 +215,19 @@ export async function startTelegram() {
   });
 
   bot.catch((error) => console.error("Telegram error:", error.error));
-  await bot.api.setMyCommands([
+  // The network may not be up yet when the Mac logs in: none of this may stop Blip from listening.
+  void bot.api.setMyCommands([
     { command: "bots", description: "Switch bot" },
     { command: "new", description: "Fresh conversation" },
     { command: "stop", description: "Stop the current task" },
     { command: "status", description: "What's running" },
     { command: "screen", description: "Screenshot of the Mac" },
     { command: "help", description: "Help" },
-  ]);
-  void bot.start({ drop_pending_updates: false }).catch((e) => console.error("Telegram stopped:", e));
+  ]).catch((e) => console.error("Telegram commands not set:", e.message));
+  const listen = () =>
+    void bot!.start({ drop_pending_updates: false }).catch((e) => {
+      console.error("Telegram stopped; trying again in a minute:", e?.message ?? e);
+      setTimeout(listen, 60_000);
+    });
+  listen();
 }

@@ -76,6 +76,22 @@ The home Wi-Fi link only works on the same network. Phones also only allow notif
 2. Run `./blip.sh remote`. **Settings → Connect your phone** then shows the private `https://` link, which only your own devices can open.
 3. Add it to the Home Screen from that link. Then in Blip, go to **Settings → Notifications → Turn on**.
 
+### Control the Mac from your phone
+
+In the app, tap the computer icon and then **Control this Mac**. It works like Chrome Remote Desktop: a live video of the screen, full screen on your phone.
+
+- **Trackpad mode:**
+  - drag to move the pointer and tap to click
+  - tap twice to double-click
+  - two-finger tap for right-click
+  - two fingers up or down to scroll
+  - hold, then drag, to drag things
+- **Touch mode:** tap exactly where you want to click.
+- **Pinch** to zoom in on small text.
+- **Keyboard** opens your phone's keyboard, and every key goes straight to the Mac.
+- **Keys** has Esc, Tab, ⌘C, ⌘V, Spotlight, the arrows and more.
+- **Quality:** Smooth, Balanced or Sharp, to suit your connection.
+
 ### macOS permissions
 
 For the Computer panel (watching and controlling the screen) and for bots that use Mac apps, open **System Settings → Privacy & Security** and turn on **node** under:
@@ -84,6 +100,16 @@ For the Computer panel (watching and controlling the screen) and for bots that u
 - **Accessibility**
 
 Then run `./blip.sh restart`.
+
+### Voice messages don't work
+
+Voice needs Homebrew's `whisper.cpp`. Homebrew renamed it from `whisper-cpp`, so older setups may have missed it. On the Mac running Blip, run:
+
+```bash
+HOMEBREW_NO_AUTO_UPDATE=1 brew install whisper.cpp
+```
+
+If Homebrew says a folder isn't writable, run `sudo chown -R $(whoami) $(brew --prefix)/share/man` first. The mic also needs the secure `https://` Tailscale link on phones.
 
 ### Keeping the Mac awake (optional)
 
@@ -101,7 +127,7 @@ Keep the lid open: a MacBook sleeps when the lid is closed.
 |---|---|
 | `./blip.sh setup` | First-time install of everything |
 | `./blip.sh install` | Build, start, and start at every login |
-| `./blip.sh restart` | Rebuild and restart, for example after editing `.env` or code |
+| `./blip.sh restart` | Rebuild and restart, for example after editing `.env` or code. Also starts Blip again after `stop`. |
 | `./blip.sh stop` | Stop the background service |
 | `./blip.sh status` | Show whether it's running |
 | `./blip.sh logs` | Follow the log |
@@ -119,6 +145,10 @@ Keep the lid open: a MacBook sleeps when the lid is closed.
 | `MODEL` | `claude-opus-5-5` | Default model. Each bot can switch to Sonnet or Haiku in the app. |
 | `EFFORT` | `high` | How hard the model thinks |
 | `DAILY_BUDGET_USD` | `10` | Spending cap when using an API key. Warnings at 50%, 80% and 100%. |
+| `FAST_MODEL` | `claude-sonnet-5-5` | With a bot's model on **Auto** (the default), quick chat uses this and real jobs use `MODEL` |
+| `MAX_PARALLEL` | `3` | How many bots can work at the same time. They take turns only on the browser and screen. |
+| `TASK_LIMIT_MIN` | `30` | Time limit for one task, counting only active time. Routines get 15 minutes and check-ins 5. |
+| `BLIP_BROWSER_HEADLESS` | empty | Set to `1` to run the bots' browser invisibly |
 | `REVIEW_MODEL` | `MODEL` | Model used by Auto Review |
 | `PROACTIVE_SCHEDULE` | `0 10,14,18 * * *` | When the primary bot looks for things to suggest (cron, local time) |
 | `TIMEZONE` | the Mac's | Timezone for routines |

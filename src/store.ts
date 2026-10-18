@@ -59,7 +59,7 @@ type State = {
   rules: Rule[];
   routines: Routine[];
   connectors: Record<string, Connector>;
-  settings: { autoReview: boolean; proactive: boolean; voiceReplies: boolean };
+  settings: { autoReview: boolean; proactive: boolean; voiceReplies: boolean; fullAccess: boolean };
   recentSuggestions: string[];
   dismissedSuggestions: string[];
   suggestionsByDay: Record<string, number>;
@@ -79,7 +79,7 @@ function load(): State {
     rules: [],
     routines: [],
     connectors: {},
-    settings: { autoReview: true, proactive: true, voiceReplies: false },
+    settings: { autoReview: true, proactive: true, voiceReplies: false, fullAccess: false },
     recentSuggestions: [],
     dismissedSuggestions: [],
     suggestionsByDay: {},
@@ -89,10 +89,15 @@ function load(): State {
     spendByDay: {},
     sessionTotals: {},
   };
+  if (!fs.existsSync(STATE_FILE)) return empty;
   try {
     const saved = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
     return { ...empty, ...saved, settings: { ...empty.settings, ...saved.settings } };
-  } catch {
+  } catch (error) {
+    // Never silently start over on top of the user's bots and routines: keep the broken file to recover from.
+    const backup = `${STATE_FILE}.broken-${Date.now()}`;
+    fs.copyFileSync(STATE_FILE, backup);
+    console.error(`state.json couldn't be read (${(error as Error).message}). Saved a copy at ${backup} and started fresh.`);
     return empty;
   }
 }
@@ -130,9 +135,13 @@ export function addSpend(usd: number) {
 
 // total_cost_usd is cumulative for a session, so only add what's new since we last saw it.
 export function recordCost(sessionId: string, sessionTotalUsd: number) {
+  // A crashed run can report 0, and a lower total than before means a step wasn't saved: neither may re-add
+  // the whole history (that once used up a day's budget at once).
+  if (!(sessionTotalUsd > 0)) return 0;
   const previous = state.sessionTotals[sessionId] ?? 0;
-  const delta = sessionTotalUsd >= previous ? sessionTotalUsd - previous : sessionTotalUsd;
-  state.sessionTotals[sessionId] = sessionTotalUsd;
+  const delta = Math.max(0, sessionTotalUsd - previous);
+  delete state.sessionTotals[sessionId]; // re-insert at the end, so the oldest-first trim below never drops a live session
+  state.sessionTotals[sessionId] = Math.max(previous, sessionTotalUsd);
   const keys = Object.keys(state.sessionTotals);
   for (const key of keys.slice(0, Math.max(0, keys.length - 100))) delete state.sessionTotals[key];
   addSpend(delta);
@@ -154,13 +163,42 @@ export function spendByBotToday(): Record<string, number> {
   return out;
 }
 
+// The action log is kept to about 5 MB: when it grows past that, it moves to audit.old.jsonl (one older copy).
+const AUDIT_MAX_BYTES = 5_000_000;
+let auditChecks = 0;
+
 export function audit(entry: Record<string, unknown>) {
-  fs.appendFileSync(AUDIT_FILE, JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n", { mode: 0o600 });
+  try {
+    if (++auditChecks % 200 === 1 && fs.existsSync(AUDIT_FILE) && fs.statSync(AUDIT_FILE).size > AUDIT_MAX_BYTES) {
+      fs.renameSync(AUDIT_FILE, path.join(config.dataDir, "audit.old.jsonl"));
+    }
+    fs.appendFileSync(AUDIT_FILE, JSON.stringify({ at: new Date().toISOString(), ...entry }) + "\n", { mode: 0o600 });
+  } catch (error) {
+    console.error("Couldn't write the action log:", (error as Error).message);
+  }
 }
 
+/** The last `count` entries, reading only the end of the file. */
 export function recentAudit(count: number): Record<string, unknown>[] {
   try {
-    return fs.readFileSync(AUDIT_FILE, "utf8").trim().split("\n").slice(-count).map((line) => JSON.parse(line));
+    const size = fs.statSync(AUDIT_FILE).size;
+    const length = Math.min(size, 512_000);
+    const buf = Buffer.alloc(length);
+    const fd = fs.openSync(AUDIT_FILE, "r");
+    try {
+      fs.readSync(fd, buf, 0, length, size - length);
+    } finally {
+      fs.closeSync(fd);
+    }
+    const lines = buf.toString("utf8").split("\n").filter(Boolean);
+    if (length < size) lines.shift(); // probably cut in the middle
+    return lines.slice(-count).flatMap((line) => {
+      try {
+        return [JSON.parse(line)];
+      } catch {
+        return [];
+      }
+    });
   } catch {
     return [];
   }
