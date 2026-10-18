@@ -6,7 +6,8 @@ import { query, type McpServerConfig, type Options, type Query, type SDKUserMess
 import { personaFor, teamAgents } from "./bots.js";
 import { config } from "./config.js";
 import { setEngines } from "./computer.js";
-import { makeCanUseTool, type RunContext } from "./permissions.js";
+import { makeCanUseTool, makeSecretGate, type RunContext } from "./permissions.js";
+import { scrub } from "./secrets.js";
 import { recordCost, spentToday, state, type BotProfile } from "./store.js";
 import { createBlipServer } from "./tools.js";
 
@@ -115,6 +116,7 @@ class Session {
       Object.entries(process.env).filter(([key]) => key !== "TELEGRAM_BOT_TOKEN" && !/^CLAUDE|^ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)$/.test(key)),
     );
     if (config.anthropicKey) env.ANTHROPIC_API_KEY = config.anthropicKey;
+    const secretGate = makeSecretGate(this.ctx);
     const options: Options = {
       model,
       effort: config.effort,
@@ -141,6 +143,38 @@ class Session {
             ...(!keepWarm || process.env.BLIP_BROWSER_HEADLESS ? ["--headless"] : []),
           ],
         },
+      },
+      // Anything a tool sends back that contains a saved secret is scrubbed before the bot sees it.
+      hooks: {
+        // {{secret:name}} placeholders are approved and filled in before any tool runs (see makeSecretGate).
+        PreToolUse: [
+          {
+            timeout: 4 * 3600, // the approval card may wait a while
+            hooks: [
+              async (hook, toolUseID, { signal }) => {
+                if (hook.hook_event_name !== "PreToolUse") return {};
+                const result = await secretGate(hook.tool_name, (hook.tool_input ?? {}) as Record<string, unknown>, signal, toolUseID);
+                if (!result) return {};
+                return {
+                  hookSpecificOutput:
+                    result.behavior === "allow"
+                      ? { hookEventName: "PreToolUse" as const, permissionDecision: "allow" as const, updatedInput: result.updatedInput }
+                      : { hookEventName: "PreToolUse" as const, permissionDecision: "deny" as const, permissionDecisionReason: result.message },
+                };
+              },
+            ],
+          },
+        ],
+        PostToolUse: [
+          {
+            hooks: [
+              async (hook) => {
+                const clean = "tool_response" in hook ? scrub(hook.tool_response) : undefined;
+                return clean === undefined ? {} : { hookSpecificOutput: { hookEventName: "PostToolUse" as const, updatedToolOutput: clean } };
+              },
+            ],
+          },
+        ],
       },
       stderr: (data) => console.error(`[${bot.name}]`, data.trimEnd()),
     };

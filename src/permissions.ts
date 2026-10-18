@@ -8,6 +8,7 @@ import { askCard } from "./cards.js";
 import { acquireComputer } from "./computer.js";
 import type { CardButton } from "./hub.js";
 import { autoReview } from "./review.js";
+import { fillSecrets, hasSecret, placeholdersIn, saveSecret } from "./secrets.js";
 import { audit, save, state, type BotProfile, type Rule } from "./store.js";
 
 // Tools that only look at things. They run without asking, and are all that read-only runs may use.
@@ -236,25 +237,122 @@ async function takeoverCard(input: Record<string, unknown>, bot: BotProfile, sig
     : { behavior: "deny", message: "The user couldn't do that step now. Stop and tell them what's left to do." };
 }
 
+/** The masked card where the user types a password or key; it goes straight into the Keychain. */
+async function secretCard(input: Record<string, unknown>, bot: BotProfile, signal: AbortSignal): Promise<PermissionResult> {
+  const name = String(input.name ?? "").trim();
+  if (!name) return { behavior: "deny", message: "Give the secret a short name, like github-token." };
+  if (hasSecret(name)) return { behavior: "allow", updatedInput: { ...input, status: "already saved" } };
+  const answer = await askCard({
+    botId: bot.id,
+    type: "secret",
+    title: `${bot.name} needs a secret: ${name}`,
+    body: String(input.why ?? ""),
+    note: "It's saved in this Mac's Keychain. The bot never sees it, and it never appears in chats or logs.",
+    buttons: [{ label: "Save", value: "save", style: "primary" }, { label: "Cancel", value: "cancel" }],
+    timeoutMs: APPROVAL_TIMEOUT_MS,
+    timeoutValue: "cancel",
+    signal,
+    remindAfterMs: REMINDERS_MS,
+  });
+  if (answer.value !== "save" || !answer.body) {
+    audit({ bot: bot.name, tool: "secret", input: name, decision: "cancelled" });
+    return { behavior: "deny", message: "The user didn't provide that secret. Ask them how they'd like to continue." };
+  }
+  try {
+    await saveSecret(name, answer.body, String(input.why ?? ""));
+  } catch (error) {
+    return { behavior: "deny", message: `Couldn't save it: ${(error as Error).message}` };
+  }
+  audit({ bot: bot.name, tool: "secret", input: name, decision: "saved" });
+  return { behavior: "allow", updatedInput: { ...input, status: "saved" } };
+}
+
+/** An action that uses {{secret:name}}: the user approves it (seeing only the placeholder), then the real value
+ *  is filled in for that one run. */
+async function withSecrets(
+  ctx: RunContext,
+  toolName: string,
+  input: Record<string, unknown>,
+  names: string[],
+  options: Parameters<CanUseTool>[2],
+  decide: Decide,
+): Promise<PermissionResult> {
+  const deny = (message: string): PermissionResult => {
+    audit({ bot: ctx.bot.name, tool: toolName, input: `uses secret ${names.join(", ")}`, decision: "denied", reason: message });
+    return { behavior: "deny", message };
+  };
+  if (ctx.readOnly) return deny("Secrets can't be used in a read-only check-in.");
+  const missing = names.filter((n) => !hasSecret(n));
+  if (missing.length) return deny(`There's no saved secret called ${missing.join(", ")}. Ask the user for it with request_secret.`);
+  const key = `secret:${toolName}:${names.join(",")}`;
+  let decision: PermissionResult;
+  if (ctx.taskAllows.has(key)) {
+    decision = await decide(toolName, input, options); // the usual checks still apply to what it does
+  } else {
+    const [title, ...detail] = describeAction(toolName, input).split("\n");
+    const { value } = await askCard({
+      botId: ctx.bot.id,
+      type: "approval",
+      title: `Use your secret “${names.join("”, “")}”: ${title!.replace(/:$/, "")}`,
+      body: detail.join("\n"),
+      note: "Blip fills in the real value for this action. The bot never sees it.",
+      buttons: [{ label: "Allow once", value: "once", style: "primary" }, { label: "Allow for this task", value: "task" }, { label: "Deny", value: "deny", style: "danger" }],
+      timeoutMs: APPROVAL_TIMEOUT_MS,
+      timeoutValue: "deny",
+      signal: options.signal,
+      remindAfterMs: REMINDERS_MS,
+    });
+    if (value === "deny") return deny("The user didn't allow using that secret here. Ask them what to do instead.");
+    if (value === "task") ctx.taskAllows.add(key);
+    decision = { behavior: "allow", updatedInput: input };
+  }
+  if (decision.behavior !== "allow") return decision;
+  try {
+    const filled = await fillSecrets(decision.updatedInput ?? input);
+    audit({ bot: ctx.bot.name, tool: toolName, input: `uses secret ${names.join(", ")}`, decision: "allowed" });
+    return { ...decision, updatedInput: filled };
+  } catch (error) {
+    return deny((error as Error).message);
+  }
+}
+
+/** Take turns on the browser and screen with other bots working in parallel. Only once the action is
+ *  allowed: a bot waiting hours on an approval card mustn't hold the computer meanwhile. */
+async function takeComputer(ctx: RunContext, toolName: string, decision: PermissionResult, signal: AbortSignal): Promise<PermissionResult> {
+  if (decision.behavior !== "allow" || !usesComputer(toolName)) return decision;
+  let waited = false;
+  try {
+    await acquireComputer({ runId: ctx.runId, botId: ctx.bot.id, botName: ctx.bot.name }, signal, (who) => {
+      waited = true;
+      ctx.onWait?.(who);
+    });
+  } catch {
+    return { behavior: "deny", message: "Stopped while waiting for the computer." };
+  }
+  if (waited) ctx.onWait?.(null);
+  ctx.usedComputer = true;
+  return decision;
+}
+
 export function makeCanUseTool(ctx: RunContext): CanUseTool {
   const decide = decider(ctx);
   return async (toolName, input, options): Promise<PermissionResult> => {
-    const decision = await decide(toolName, input, options);
-    // Take turns on the browser and screen with other bots working in parallel. Only once the action is
-    // allowed: a bot waiting hours on an approval card mustn't hold the computer meanwhile.
-    if (decision.behavior !== "allow" || !usesComputer(toolName)) return decision;
-    let waited = false;
-    try {
-      await acquireComputer({ runId: ctx.runId, botId: ctx.bot.id, botName: ctx.bot.name }, options.signal, (who) => {
-        waited = true;
-        ctx.onWait?.(who);
-      });
-    } catch {
-      return { behavior: "deny", message: "Stopped while waiting for the computer." };
-    }
-    if (waited) ctx.onWait?.(null);
-    ctx.usedComputer = true;
-    return decision;
+    const names = toolName === "mcp__blip__request_secret" ? [] : placeholdersIn(input);
+    const decision = names.length ? await withSecrets(ctx, toolName, input, names, options, decide) : await decide(toolName, input, options);
+    return takeComputer(ctx, toolName, decision, options.signal);
+  };
+}
+
+/** Runs before every tool call, including ones the engine would allow without asking (like `echo`): any
+ *  {{secret:name}} goes through the approval card and is filled in here. Undefined: nothing to do. */
+export function makeSecretGate(ctx: RunContext) {
+  const decide = decider(ctx);
+  return async (toolName: string, input: Record<string, unknown>, signal: AbortSignal, toolUseID?: string): Promise<PermissionResult | undefined> => {
+    if (toolName === "mcp__blip__request_secret") return undefined;
+    const names = placeholdersIn(input);
+    if (!names.length) return undefined;
+    const options = { signal, toolUseID: toolUseID ?? "" } as Parameters<CanUseTool>[2];
+    return takeComputer(ctx, toolName, await withSecrets(ctx, toolName, input, names, options, decide), signal);
   };
 }
 
@@ -294,6 +392,7 @@ function decider(ctx: RunContext): Decide {
     // 2. Cards that always involve the user.
     if (toolName === "mcp__blip__propose_draft") return draftCard(input, ctx.bot, signal);
     if (toolName === "mcp__blip__request_takeover") return takeoverCard(input, ctx.bot, signal);
+    if (toolName === "mcp__blip__request_secret") return secretCard(input, ctx.bot, signal);
 
     // 3. Connector access level (Muse-style read-only / full access per app).
     if (connectorName) {
@@ -303,7 +402,9 @@ function decider(ctx: RunContext): Decide {
       if (access === "read" && !connectorReadOnly) return deny(`The ${connectorName} connector is read-only. Ask the user to give it full access with /connectors.`);
     }
 
-    const sensitive = target ? isSensitive(target, { searchesFolder }) || (WRITE_TOOLS.has(toolName) && isWriteProtected(target)) : false;
+    // Reading the Keychain from the terminal would reveal secrets: always the user's call.
+    const keychain = toolName === "Bash" && /\bsecurity\b|keychain/i.test(String(input.command ?? ""));
+    const sensitive = keychain || (target ? isSensitive(target, { searchesFolder }) || (WRITE_TOOLS.has(toolName) && isWriteProtected(target)) : false);
     const askFirst = matchingRule("ask", toolName, input, summary);
     // Commit-like clicks, keystrokes and connector writes ("Send", "Pay", "Delete", "Accept offer") always ask.
     const actsAsUser = INTERACTIVE.has(toolName) || (connectorName !== undefined && !connectorReadOnly);

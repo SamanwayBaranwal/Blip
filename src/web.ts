@@ -17,6 +17,8 @@ import {
 import { deleteThread, events, getThread, stateChanged, type Msg } from "./hub.js";
 import * as mac from "./mac.js";
 import * as screen from "./screen.js";
+import { attachRemote } from "./remote.js";
+import { deleteSecret, listSecrets, saveSecret } from "./secrets.js";
 
 /** Input failing almost always means macOS hasn't given Blip permission to control the Mac. */
 const inputError = (error: unknown) =>
@@ -49,7 +51,7 @@ const matches = (given: unknown) => {
   const b = Buffer.from(accessCode);
   return a.length === b.length && timingSafeEqual(a, b);
 };
-const cookieOf = (req: Request) => /(?:^|;\s*)blip=([^;]+)/.exec(req.headers.cookie ?? "")?.[1];
+const cookieOf = (req: { headers: { cookie?: string } }) => /(?:^|;\s*)blip=([^;]+)/.exec(req.headers.cookie ?? "")?.[1];
 
 function setSession(req: Request, res: Response) {
   const secure = req.headers["x-forwarded-proto"] === "https" ? "; Secure" : "";
@@ -416,6 +418,23 @@ export function startWeb() {
   api.get("/history", (_req, res) => void res.json(state.runs.slice(-60).reverse()));
   api.get("/log", (_req, res) => void res.json(recentAudit(80).reverse()));
 
+  // ---- secrets vault (names only ever leave the Mac; values go into the Keychain)
+  api.get("/secrets", (_req, res) => void res.json(listSecrets()));
+  api.post("/secrets", async (req, res) => {
+    try {
+      const name = await saveSecret(str(req.body.name, 60), str(req.body.value, 5000), str(req.body.note, 200));
+      closeWarmSession(); // bots learn the new name
+      res.json({ ok: true, name });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  });
+  api.delete("/secrets/:name", async (req, res) => {
+    await deleteSecret(String(req.params.name));
+    closeWarmSession();
+    res.json({ ok: true });
+  });
+
   // ---- files (artifacts)
   api.get("/files", (_req, res) => void res.json(recentFiles(60)));
   api.get("/file", (req, res) => {
@@ -513,5 +532,6 @@ export function startWeb() {
   });
 
   app.use("/api", api);
-  app.listen(config.webPort, "0.0.0.0", () => console.log(`App running on http://localhost:${config.webPort}`));
+  const server = app.listen(config.webPort, "0.0.0.0", () => console.log(`App running on http://localhost:${config.webPort}`));
+  attachRemote(server, (req) => matches(cookieOf(req))); // remote desktop: video + input over one WebSocket
 }

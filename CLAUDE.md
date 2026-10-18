@@ -152,6 +152,28 @@ Fixed after a full audit. Keep these invariants:
   - Unmounting the composer turns the mic off.
   - Toasts appear above RemoteView. Fields are 16px on touch screens, so iOS doesn't zoom.
 
+## Remote desktop and secrets vault (2026-10-18)
+
+- **Remote desktop (`src/remote.ts`)** works like Chrome Remote Desktop:
+  - **Connection:** one WebSocket at `/api/remote`. The cookie is checked when the connection is upgraded.
+  - **Video:** ffmpeg runs avfoundation into `h264_videotoolbox` (falling back to libx264), producing fragmented MP4 with `frag_every_frame`. Each `moof`+`mdat` pair is one frame. The `moov`'s avcC becomes the WebCodecs `description`.
+  - **Frame messages:** each frame is sent as `[key flag][uint32 seq][AVCC data]`, and the phone acks every frame.
+  - **Congestion control:** if the oldest unacked frame is more than 350 ms old, the server skips frames until the next keyframe. This keeps delay from piling up in the network; a test with a throttled link showed 14 s of lag without it and about 30 ms with it.
+  - **Auto quality:** steps down a `LADDER` (`app.js`) on skipped frames, and back up after 20 s calm (60 s after a slowdown).
+  - **Input:** goes to `bin/blip-input`, an always-running native helper built from `mac-app/input.swift` (CGEvent, Unicode typing without the clipboard). It's built automatically at startup when the command line tools exist; `xcode-select -p` is checked first so there's never an install popup. Without it, input falls back to cliclick.
+  - **Fallbacks:** browsers without WebCodecs (or on plain http) get the MJPEG view, but input still goes over the WebSocket.
+  - **Tested:**
+    - Chrome and WebKit decode at 30 fps.
+    - Every gesture works.
+    - The throttled link stays responsive.
+- **Secrets vault (`src/secrets.ts`):**
+  - **Storage:** values live in the Keychain (`security`, service "Blip", with the value written through stdin). Only names live in `state.secrets`.
+  - **Adding:** `request_secret` shows a masked "secret" card; Telegram never collects secrets.
+  - **Using:** `{{secret:name}}` in any tool input is handled by a **PreToolUse hook** (`makeSecretGate`), not `canUseTool`. The engine auto-allows commands like `echo` without calling `canUseTool`; that bypass was found in testing. The hook asks "Use your secret …" (Allow once / for this task / Deny), then fills in the value.
+  - **Scrubbing:** a PostToolUse hook scrubs known values from all tool output (`updatedToolOutput`).
+  - **Keychain access:** Bash touching `security` or the keychain always asks.
+  - **Tested:** the value is filled in, the bot only sees the placeholder, and no file contains the value.
+
 ## How the code fits together
 
 - `hub.ts` is the single source of truth for conversations. Message kinds are `text`, `run` (live progress) and `card`.

@@ -18,6 +18,7 @@ Every bot has the Mac as its computer: a terminal, files, a real Chrome browser,
 - **Routines** that run on a schedule, with test runs, plus starter templates.
 - **Skills** you teach once and reuse. **Connectors** (MCP servers) with read, full or off access.
 - **Proactive suggestions**, read-only and at most 3 a day.
+- **A secrets vault**: a bot asks for a password or API key on a masked card, and it's saved in the Mac's Keychain. Bots only ever see a placeholder like `{{secret:github-token}}`. Blip fills in the real value when an action runs, after you approve it, and scrubs it from anything a tool sends back. Manage your secrets in **Settings → Secrets**.
 - **Files panel**, **editable memory**, 👍/👎 feedback, **voice in and out**, **push notifications**, activity history and an action log.
 - **Runs on your Claude plan** with no API key, or on an Anthropic API key with a daily spending limit.
 
@@ -88,9 +89,12 @@ In the app, tap the computer icon and then **Control this Mac**. It works like C
   - hold, then drag, to drag things
 - **Touch mode:** tap exactly where you want to click.
 - **Pinch** to zoom in on small text.
-- **Keyboard** opens your phone's keyboard, and every key goes straight to the Mac.
+- **Keyboard** opens your phone's keyboard, and every key goes straight to the Mac, in any language.
+- **Clipboard** (under Keys): paste your phone's clipboard onto the Mac, or copy the Mac's clipboard to your phone.
 - **Keys** has Esc, Tab, ⌘C, ⌘V, Spotlight, the arrows and more.
-- **Quality:** Smooth, Balanced or Sharp, to suit your connection.
+- **Quality:** Auto (the default) adjusts to your connection the way Chrome Remote Desktop does. You can also pick Smooth, Sharp or Data saver.
+
+It streams real video (H.264, encoded by the Mac's hardware) and sends input over one live connection, so it stays smooth even on mobile data. The live chip shows the frame rate and the delay. For the fastest clicks and typing, install Apple's command line tools once on the Blip Mac (`xcode-select --install`). Blip then builds its native input helper by itself.
 
 ### macOS permissions
 

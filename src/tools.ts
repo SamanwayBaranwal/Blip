@@ -10,6 +10,7 @@ import * as mac from "./mac.js";
 import { post } from "./outbox.js";
 import { inside, isSensitive } from "./permissions.js";
 import { addRoutine, describeRoutines, removeRoutine } from "./routines.js";
+import { cleanName } from "./secrets.js";
 import { save, state, today, type BotProfile } from "./store.js";
 
 const MAX_SUGGESTIONS_PER_DAY = 3;
@@ -156,6 +157,17 @@ export function createBlipServer(bot: BotProfile) {
         },
         async ({ channel, to, subject, body }) =>
           text(`APPROVED by the user. Send this ${channel} to ${to} now${subject ? ` with subject "${subject}"` : ""}, using exactly this text:\n\n${body}`),
+      ),
+      tool(
+        "request_secret",
+        "Ask the user for a password, API key or other secret. They type it into a masked field; it's saved in the Mac's Keychain and you never see it. " +
+          "Afterwards write {{secret:NAME}} wherever it's needed (a terminal command, a browser field, Mac typing): Blip fills in the real value when that action runs, after the user approves. " +
+          "Check the saved names first (they're listed in your instructions) and reuse them.",
+        {
+          name: z.string().describe("Short name, e.g. 'github-token' or 'netflix-password'"),
+          why: z.string().describe("What it's for, shown to the user, e.g. 'To sign in to GitHub and open the pull request'"),
+        },
+        async ({ name }) => text(`Saved. Use {{secret:${cleanName(name)}}} wherever it's needed; the real value is filled in only when that action runs. Never try to print or reveal it.`),
       ),
       tool(
         "request_takeover",

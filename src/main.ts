@@ -4,6 +4,7 @@ import { ensureDefaultBot } from "./bots.js";
 import { config } from "./config.js";
 import { stopCurrent, welcome } from "./core.js";
 import { startRoutines } from "./routines.js";
+import { loadSecrets } from "./secrets.js";
 import { save, state } from "./store.js";
 import { startTelegram } from "./telegram-app.js";
 import { bot as telegram } from "./telegram.js";
@@ -14,6 +15,7 @@ const sharedNotes = path.join(config.workspace, "CLAUDE.md");
 if (!fs.existsSync(sharedNotes)) fs.writeFileSync(sharedNotes, "# Shared notes about the user\n\n## About the user\n");
 
 startRoutines();
+void loadSecrets().catch((error) => console.error("Couldn't load secrets from the Keychain:", error));
 startWeb();
 await startTelegram().catch((error) => console.error("Telegram failed to start (the app still works):", error));
 

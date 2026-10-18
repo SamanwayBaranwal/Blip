@@ -68,6 +68,8 @@ type State = {
   onboarded: boolean;
   spendByDay: Record<string, number>;
   sessionTotals: Record<string, number>;
+  /** Names of secrets in the Keychain (the values are never stored here). */
+  secrets: { name: string; note: string; createdAt: string; lastUsedAt?: string }[];
 };
 
 const STATE_FILE = path.join(config.dataDir, "state.json");
@@ -88,6 +90,7 @@ function load(): State {
     onboarded: false,
     spendByDay: {},
     sessionTotals: {},
+    secrets: [],
   };
   if (!fs.existsSync(STATE_FILE)) return empty;
   try {

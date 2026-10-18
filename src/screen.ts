@@ -64,6 +64,10 @@ let streamKey = "";
 let lastError = "";
 let stopTimer: NodeJS.Timeout | undefined;
 
+export const ffmpegPath = () => findBin("ffmpeg");
+/** avfoundation's index for the main screen (used by the H.264 remote view too). */
+export const captureDevice = () => screenDevice(findBin("ffmpeg")!);
+
 async function screenDevice(ff: string): Promise<string> {
   // ffmpeg lists devices on stderr and exits non-zero; we only need the "Capture screen 0" index.
   const out = await run(ff, ["-hide_banner", "-f", "avfoundation", "-list_devices", "true", "-i", ""]).catch((e) => e as { stderr?: string });

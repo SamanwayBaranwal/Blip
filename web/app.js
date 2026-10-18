@@ -527,18 +527,22 @@ function RunBlock({ m, bot }) {
   </div>`;
 }
 
-const KICKER = { approval: "Needs your approval", draft: "Draft · review before it's sent", takeover: "Your turn", suggestion: "Suggestion" };
+const KICKER = { approval: "Needs your approval", draft: "Draft · review before it's sent", takeover: "Your turn", suggestion: "Suggestion", secret: "Secret · saved to the Keychain" };
 
 function Card({ m, onTakeover }) {
   const c = m.card;
   const pending = c.status === "pending";
   const [busy, setBusy] = useState(false);
   const [draftBody, setDraftBody] = useState(c.draft?.body ?? "");
+  const [secret, setSecret] = useState("");
+  const [reveal, setReveal] = useState(false);
   useEffect(() => setDraftBody(c.draft?.body ?? ""), [c.draft?.body]);
   const answer = async (value) => {
+    if (c.type === "secret" && value === "save" && !secret) return toast("Type the secret first");
     setBusy(true);
     try {
-      await api(`/card/${m.id}`, { method: "POST", body: { value, body: c.draft ? draftBody : undefined } });
+      await api(`/card/${m.id}`, { method: "POST", body: { value, body: c.draft ? draftBody : c.type === "secret" && value === "save" ? secret : undefined } });
+      setSecret(""); // never keep it around in the page
     } catch (e) {
       fail(e);
       setBusy(false);
@@ -553,7 +557,13 @@ function Card({ m, onTakeover }) {
           ? html`<label class="draft-field">Message (edit before sending)<textarea value=${draftBody} onInput=${(e) => setDraftBody(e.target.value)} /></label>`
           : html`<div class="card-body">${c.draft.body}</div>`}`
       : c.body ? html`<div class=${`card-body ${/terminal|file$/i.test(c.title) ? "code" : ""}`}>${c.body}</div>` : null}
-    ${c.note ? html`<div class=${`card-note ${c.type === "takeover" || c.type === "suggestion" ? "info" : ""}`}>${c.note}</div>` : null}
+    ${c.type === "secret" && pending
+      ? html`<form class="secret-field" onSubmit=${(e) => { e.preventDefault(); answer("save"); }}>
+          <input class="input" type=${reveal ? "text" : "password"} autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste or type it here" value=${secret} onInput=${(e) => setSecret(e.target.value)} />
+          <button type="button" class="btn small" onClick=${() => setReveal(!reveal)}>${reveal ? "Hide" : "Show"}</button>
+        </form>`
+      : null}
+    ${c.note ? html`<div class=${`card-note ${c.type === "takeover" || c.type === "suggestion" || c.type === "secret" ? "info" : ""}`}>${c.note}</div>` : null}
     ${pending
       ? html`<div class="card-actions">
           ${c.type === "takeover" ? html`<button class="btn" onClick=${onTakeover}><${I.computer} /> Open computer</button>` : null}
@@ -877,16 +887,175 @@ const REMOTE_KEYS = [
   ["Page ↑", "page-up"], ["Page ↓", "page-down"],
 ];
 
+// ---- Chrome Remote Desktop-style link: H.264 video decoded by the device's hardware (WebCodecs) and input,
+// clipboard and latency pings over one WebSocket. Old browsers fall back to JPEG snapshots + HTTP input.
+const LADDER = [
+  { w: 960, fps: 20, kbps: 700 },
+  { w: 1280, fps: 30, kbps: 1600 },
+  { w: 1600, fps: 30, kbps: 2800 },
+  { w: 1920, fps: 30, kbps: 4500 },
+];
+const REMOTE_QUALITY = {
+  auto: { label: "Auto", step: 1 },
+  smooth: { label: "Smooth", step: 1 },
+  sharp: { label: "Sharp", step: 3 },
+  saver: { label: "Data saver", step: 0 },
+};
+const canDecodeVideo = typeof VideoDecoder !== "undefined" && typeof EncodedVideoChunk !== "undefined";
+
+function useRemoteLink(canvasRef, quality, enabled, onClip) {
+  const [info, setInfo] = useState({ mode: canDecodeVideo ? "connecting" : "fallback", live: false, fps: 0, rtt: null, kbps: 0, error: null, step: null });
+  const wsRef = useRef(null);
+  const clipRef = useRef(onClip);
+  clipRef.current = onClip;
+  const stepRef = useRef(REMOTE_QUALITY[quality]?.step ?? 1);
+  const qualityRef = useRef(quality);
+  qualityRef.current = quality;
+  const sendQuality = () => {
+    const ws = wsRef.current;
+    if (canDecodeVideo && ws?.readyState === 1) ws.send(JSON.stringify({ t: "quality", ...LADDER[stepRef.current] }));
+    setInfo((i) => ({ ...i, step: stepRef.current }));
+  };
+  useEffect(() => {
+    stepRef.current = REMOTE_QUALITY[quality]?.step ?? 1;
+    sendQuality();
+  }, [quality]);
+  useEffect(() => {
+    if (!enabled) return; // without video decoding (old browser, plain http) the link still carries input
+    let alive = true, decoder = null, waitKey = true, frames = 0, bytes = 0, lastFrame = 0, failures = 0, retry, lastStep = 0, calm = 0, lastRtt = null;
+    const draw = (frame) => {
+      const c = canvasRef.current;
+      if (c) {
+        if (c.width !== frame.displayWidth) c.width = frame.displayWidth;
+        if (c.height !== frame.displayHeight) c.height = frame.displayHeight;
+        c.getContext("2d").drawImage(frame, 0, 0);
+      }
+      frame.close();
+      frames++;
+      lastFrame = Date.now();
+    };
+    const configure = async (cfg) => {
+      const config = { codec: cfg.codec, description: Uint8Array.from(atob(cfg.description), (ch) => ch.charCodeAt(0)), optimizeForLatency: true, hardwareAcceleration: "prefer-hardware" };
+      let ok = await VideoDecoder.isConfigSupported(config).then((r) => r.supported, () => false);
+      if (!ok) {
+        delete config.hardwareAcceleration;
+        ok = await VideoDecoder.isConfigSupported(config).then((r) => r.supported, () => false);
+      }
+      if (!ok) return setInfo((i) => ({ ...i, mode: "fallback" })); // this device can't decode it
+      try { decoder?.close(); } catch {}
+      decoder = new VideoDecoder({ output: draw, error: () => (waitKey = true) });
+      decoder.configure(config);
+      waitKey = true;
+    };
+    const connect = () => {
+      const ws = new WebSocket(`${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/api/remote`);
+      ws.binaryType = "arraybuffer";
+      wsRef.current = ws;
+      ws.onopen = () => {
+        setInfo((i) => ({ ...i, connected: true }));
+        sendQuality();
+      };
+      ws.onmessage = (e) => {
+        if (typeof e.data === "string") {
+          const m = JSON.parse(e.data);
+          if (m.t === "config") configure(m);
+          else if (m.t === "error") setInfo((i) => ({ ...i, error: m.msg }));
+          else if (m.t === "pong") {
+            lastRtt = Math.round(performance.now() - m.at);
+            setInfo((i) => ({ ...i, rtt: lastRtt }));
+          }
+          else if (m.t === "clip") clipRef.current?.(m.text);
+          else if (m.t === "clip-set") toast("Copied to the Mac's clipboard");
+          else if (m.t === "health" && qualityRef.current === "auto") {
+            // Auto quality: step down as soon as frames are being skipped, back up after a calm 20 s.
+            const now = Date.now();
+            if (m.drops > 0 && stepRef.current > 0 && now - lastStep > 4000) {
+              stepRef.current--;
+              lastStep = now;
+              calm = 0;
+              sendQuality();
+            } else if (m.drops || (lastRtt ?? 0) > 300) {
+              calm = 0;
+            } else if ((calm += 2) >= (now - lastStep < 120_000 ? 60 : 20) && stepRef.current < 2) { // slower to retry after a slowdown
+              stepRef.current++;
+              lastStep = now;
+              calm = 0;
+              sendQuality();
+            }
+          }
+          return;
+        }
+        const buf = new Uint8Array(e.data);
+        bytes += buf.length;
+        failures = 0;
+        // Confirm every frame right away: the Mac only sends more while frames are arriving promptly.
+        const seqNo = ((buf[1] << 24) | (buf[2] << 16) | (buf[3] << 8) | buf[4]) >>> 0;
+        if (ws.readyState === 1) ws.send(`{"t":"ack","seq":${seqNo}}`);
+        if (!decoder || decoder.state !== "configured") return;
+        const key = buf[0] === 1;
+        if (waitKey && !key) return;
+        if (decoder.decodeQueueSize > 6 && !key) return void (waitKey = true); // the device is behind: skip to the next keyframe
+        waitKey = false;
+        const ts = ((buf[1] << 24) | (buf[2] << 16) | (buf[3] << 8) | buf[4]) >>> 0;
+        try {
+          decoder.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: ts * 33_333, data: buf.subarray(5) }));
+        } catch {
+          waitKey = true;
+        }
+      };
+      ws.onclose = () => {
+        if (!alive) return;
+        setInfo((i) => ({ ...i, connected: false }));
+        // Reconnect; after repeated failures use the simpler snapshot view instead.
+        if (++failures >= 4) return setInfo((i) => ({ ...i, mode: "fallback" }));
+        retry = setTimeout(connect, 1000 * failures);
+      };
+    };
+    connect();
+    const tick = setInterval(() => {
+      const ws = wsRef.current;
+      if (ws?.readyState === 1) ws.send(JSON.stringify({ t: "ping", at: performance.now() }));
+      const live = Date.now() - lastFrame < 3000;
+      setInfo((i) => ({ ...i, mode: i.mode === "fallback" || !canDecodeVideo ? "fallback" : live ? "video" : "connecting", live, fps: frames, kbps: Math.round((bytes * 8) / 1000) }));
+      frames = 0;
+      bytes = 0;
+    }, 1000);
+    return () => {
+      alive = false;
+      clearInterval(tick);
+      clearTimeout(retry);
+      wsRef.current?.close();
+      wsRef.current = null;
+      try { decoder?.close(); } catch {}
+    };
+  }, [enabled]);
+  /** Sends a message over the link; false when it isn't connected (the caller then uses HTTP). */
+  const send = (m) => {
+    const ws = wsRef.current;
+    if (ws?.readyState !== 1) return false;
+    ws.send(JSON.stringify(m));
+    return true;
+  };
+  return { info, send };
+}
+
 /** Full-screen remote control: trackpad or touch mode, pinch zoom, two-finger scroll, live keyboard. */
 function RemoteView({ onClose }) {
   const [mode, setMode] = useState(() => localStorage.getItem("remote-mode") || (coarse ? "trackpad" : "touch"));
-  const [quality, setQuality] = useState(() => localStorage.getItem("remote-quality") || "balanced");
+  const [quality, setQuality] = useState(() => {
+    const saved = localStorage.getItem("remote-quality");
+    return REMOTE_QUALITY[saved] ? saved : "auto";
+  });
+  const [clip, setClip] = useState(null); // text fetched from the Mac's clipboard
   const [keysOpen, setKeysOpen] = useState(false);
   const [cursor, setCursor] = useState({ x: 0.5, y: 0.5 });
   const [view, setView] = useState({ s: 1, tx: 0, ty: 0 });
   const [dragging, setDragging] = useState(false);
-  const stage = useRef(), img = useRef(), kbd = useRef();
-  const info = useScreenStream(img, QUALITY[quality], true);
+  const stage = useRef(), img = useRef(), canvas = useRef(), kbd = useRef();
+  const link = useRemoteLink(canvas, quality, true, setClip);
+  const fallback = link.info.mode === "fallback";
+  const info = useScreenStream(img, QUALITY[quality === "sharp" ? "sharp" : quality === "saver" ? "smooth" : "balanced"], fallback);
+  const media = () => (fallback ? img.current : canvas.current);
   const cur = useRef(cursor);
   cur.current = cursor;
   const v = useRef(view);
@@ -900,8 +1069,17 @@ function RemoteView({ onClose }) {
   // clicks reach the Mac in the order you did them; moves and scrolls are throttled.
   const chain = useRef(Promise.resolve());
   // Each action gets at most 8 s, so one hung request can't silently block every later click and key.
+  const toLink = (action, b) =>
+    action === "pointer" ? { t: "pointer", a: b.action, x: b.nx, y: b.ny }
+    : action === "wheel" ? { t: "wheel", dx: b.dx, dy: b.dy }
+    : action === "type" ? { t: "type", text: b.text }
+    : { t: "key", keys: b.keys };
+  // Over the live link everything arrives in order by itself; the HTTP fallback queues requests.
   const act = (action, body) =>
-    (chain.current = chain.current.then(() => Promise.race([screenApi(action, body), new Promise((r) => setTimeout(r, 8000))])));
+    link.send(toLink(action, body))
+      ? Promise.resolve()
+      : (chain.current = chain.current.then(() => Promise.race([screenApi(action, body), new Promise((r) => setTimeout(r, 8000))])));
+  const fast = () => !!link.info.connected;
   const moveTimer = useRef(), pendingMove = useRef(null);
   const sendMove = (nx, ny, action = "move") => {
     pendingMove.current = { nx, ny, action };
@@ -910,9 +1088,10 @@ function RemoteView({ onClose }) {
       moveTimer.current = null;
       const m = pendingMove.current;
       if (!m) return;
-      if (m.action === "move") screenApi("pointer", { action: "move", nx: m.nx, ny: m.ny });
-      else act("pointer", { action: m.action, nx: m.nx, ny: m.ny });
-    }, 70);
+      if (m.action === "move") {
+        if (!link.send({ t: "pointer", a: "move", x: m.nx, y: m.ny })) screenApi("pointer", { action: "move", nx: m.nx, ny: m.ny });
+      } else act("pointer", { action: m.action, nx: m.nx, ny: m.ny });
+    }, fast() ? 16 : 70); // about 60 updates a second over the live link
   };
   const scrollAcc = useRef({ dx: 0, dy: 0 }), scrollTimer = useRef();
   const sendScroll = (dx, dy) => {
@@ -924,7 +1103,7 @@ function RemoteView({ onClose }) {
       const a = scrollAcc.current;
       scrollAcc.current = { dx: 0, dy: 0 };
       if (Math.abs(a.dx) + Math.abs(a.dy) > 1) act("wheel", { dx: Math.round(a.dx), dy: Math.round(a.dy) });
-    }, 110);
+    }, fast() ? 24 : 110);
   };
   const textQueue = useRef(""), textTimer = useRef();
   const flushText = () => {
@@ -936,7 +1115,7 @@ function RemoteView({ onClose }) {
   };
   const typeText = (t) => {
     textQueue.current += t;
-    if (!textTimer.current) textTimer.current = setTimeout(flushText, 120);
+    if (!textTimer.current) textTimer.current = setTimeout(flushText, fast() ? 30 : 120);
   };
   const pressKey = (keys) => {
     flushText();
@@ -945,7 +1124,7 @@ function RemoteView({ onClose }) {
 
   // ---- coordinates
   const norm = (clientX, clientY) => {
-    const r = img.current.getBoundingClientRect();
+    const r = media().getBoundingClientRect();
     return { x: Math.min(1, Math.max(0, (clientX - r.left) / r.width)), y: Math.min(1, Math.max(0, (clientY - r.top) / r.height)) };
   };
   const clampView = (s, tx, ty) => {
@@ -1020,7 +1199,7 @@ function RemoteView({ onClose }) {
       st.ly = e.clientY;
       st.moved += Math.abs(dx) + Math.abs(dy);
       if (mode === "trackpad") {
-        const r = img.current.getBoundingClientRect();
+        const r = media().getBoundingClientRect();
         const speed = Math.hypot(dx, dy);
         const accel = 1 + Math.min(1.2, speed / 25); // faster swipes move further, like a real trackpad
         const nx = Math.min(1, Math.max(0, cur.current.x + (dx * accel) / r.width));
@@ -1148,10 +1327,20 @@ function RemoteView({ onClose }) {
     }
   };
 
+  // Clipboard sync, like Chrome Remote Desktop: this device's clipboard → the Mac's.
+  const sendClipboard = async () => {
+    let text = null;
+    try { text = await navigator.clipboard.readText(); } catch {}
+    if (text == null) text = prompt("Text to put on the Mac's clipboard:");
+    if (!text) return;
+    if (!link.send({ t: "clip-set", text })) toast("Clipboard needs the live connection");
+  };
   const cursorStyle = `left:${cursor.x * 100}%;top:${cursor.y * 100}%`;
   return html`<div class="remote" role="dialog" aria-label="Control your Mac">
     <div class="remote-top">
-      <span class=${`chip ${info.live ? "live" : ""}`}>${info.live ? `Live · ${info.fps} fps` : info.slow ? "Snapshots (slow link)" : info.error ? "Not connected" : "Connecting…"}</span>
+      ${fallback
+        ? html`<span class=${`chip ${info.live ? "live" : ""}`}>${info.live ? `Live · ${info.fps} fps` : info.slow ? "Snapshots (slow link)" : info.error ? "Not connected" : "Connecting…"}</span>`
+        : html`<span class=${`chip ${link.info.live ? "live" : ""}`}>${link.info.live ? `Live · ${link.info.fps} fps${link.info.rtt != null ? ` · ${link.info.rtt} ms` : ""}` : link.info.error ? "Not connected" : "Connecting…"}</span>`}
       ${view.s > 1 ? html`<button class="chip btn" onClick=${() => setView({ s: 1, tx: 0, ty: 0 })}>${view.s.toFixed(1)}× · Reset zoom</button>` : null}
       ${dragging ? html`<span class="chip">Dragging</span>` : null}
       <span style="flex:1" />
@@ -1161,14 +1350,24 @@ function RemoteView({ onClose }) {
       onClick=${onClick} onDblClick=${onDblClick} onContextMenu=${onContextMenu} onWheel=${onWheel}>
       <div class="remote-canvas" style=${`transform:translate(${view.tx}px,${view.ty}px) scale(${view.s})`}>
         <div class="remote-frame">
-          <img ref=${img} alt="Your Mac's screen" draggable="false" />
+          <canvas ref=${canvas} class="remote-video" style=${fallback ? "display:none" : ""} aria-label="Your Mac's screen" />
+          <img ref=${img} alt="Your Mac's screen" draggable="false" style=${fallback ? "" : "display:none"} />
           ${mode === "trackpad" ? html`<span class="remote-cursor" style=${cursorStyle}><svg viewBox="0 0 24 24"><path d="M5 3v16l4.5-4 3 7 3-1.3-3-6.7H18z" fill="#fff" stroke="#000" stroke-width="1.4" stroke-linejoin="round"/></svg></span>` : null}
         </div>
       </div>
-      ${info.error && !info.live && !info.slow ? html`<div class="remote-error">${info.error}</div>` : null}
+      ${fallback
+        ? info.error && !info.live && !info.slow ? html`<div class="remote-error">${info.error}</div>` : null
+        : link.info.error && !link.info.live ? html`<div class="remote-error">${link.info.error}</div>` : null}
+      ${clip !== null
+        ? html`<div class="remote-clip" onPointerDown=${(e) => e.stopPropagation()} onPointerUp=${(e) => e.stopPropagation()} onClick=${(e) => e.stopPropagation()} onDblClick=${(e) => e.stopPropagation()}><b>Mac clipboard</b><div class="remote-clip-text">${clip || "(empty)"}</div>
+            <div style="display:flex;gap:8px"><button class="btn small primary" onClick=${() => (navigator.clipboard ? navigator.clipboard.writeText(clip).then(() => toast("Copied to this device")).catch(() => toast("Select the text and copy it")) : toast("Select the text and copy it"))}>Copy here</button>
+            <button class="btn small" onClick=${() => setClip(null)}>Close</button></div></div>`
+        : null}
     </div>
     ${keysOpen
-      ? html`<div class="remote-keys">${REMOTE_KEYS.map(([label, k]) => html`<button class="btn small" onClick=${() => pressKey(k)}>${label}</button>`)}</div>`
+      ? html`<div class="remote-keys">${REMOTE_KEYS.map(([label, k]) => html`<button class="btn small" onClick=${() => pressKey(k)}>${label}</button>`)}
+          <button class="btn small" onClick=${sendClipboard}>Paste to Mac clipboard</button>
+          <button class="btn small" onClick=${() => (link.send({ t: "clip-get" }) ? null : toast("Clipboard needs the live connection"))}>Get Mac clipboard</button></div>`
       : null}
     <div class="remote-bar">
       <${Seg} value=${mode} options=${[["trackpad", "Trackpad"], ["touch", "Touch"]]} onChange=${setMode} />
@@ -1176,7 +1375,7 @@ function RemoteView({ onClose }) {
       <button class=${`btn small ${keysOpen ? "primary" : ""}`} onClick=${() => setKeysOpen(!keysOpen)}>Keys</button>
       <button class="btn small" onClick=${() => act("pointer", { action: "right", nx: cursor.x, ny: cursor.y })}>Right-click</button>
       <select class="input" style="height:30px;width:auto;flex:none;padding:0 8px;font-size:13px" value=${quality} onChange=${(e) => setQuality(e.target.value)} aria-label="Stream quality">
-        ${Object.entries(QUALITY).map(([k, q]) => html`<option value=${k}>${q.label}</option>`)}
+        ${Object.entries(REMOTE_QUALITY).map(([k, q]) => html`<option value=${k}>${q.label}</option>`)}
       </select>
       <input ref=${kbd} class="remote-kbd" value="··" autocapitalize="off" autocomplete="off" autocorrect="off" spellcheck="false" onBeforeInput=${onBeforeInput} onKeyDown=${onKbdKey} aria-label="Type on your Mac" />
     </div>
@@ -1343,6 +1542,14 @@ function PairPhone() {
 function SettingsSheet({ st, onClose }) {
   const [rules, reloadRules] = useLoad(() => api("/rules"), []);
   const [connectors, reloadConnectors] = useLoad(() => api("/connectors"), []);
+  const [secrets, reloadSecrets] = useLoad(() => api("/secrets"), []);
+  const [newSecret, setNewSecret] = useState({ name: "", value: "" });
+  const addSecret = (e) => {
+    e.preventDefault();
+    api("/secrets", { method: "POST", body: newSecret })
+      .then(() => { setNewSecret({ name: "", value: "" }); reloadSecrets(); toast("Saved to the Keychain"); })
+      .catch(fail);
+  };
   const [newRule, setNewRule] = useState("");
   const [theme, setTheme] = useState(localStorage.getItem("theme") || "dark");
   // "On" only when this device really has a push subscription the Mac knows about (re-sent on every visit).
@@ -1392,6 +1599,18 @@ function SettingsSheet({ st, onClose }) {
     <div class="list">${(rules || []).map((r) => html`<div class="row"><div class="grow"><b>${r.text}</b></div><button class="icon-btn" onClick=${() => api(`/rules/${r.id}`, { method: "DELETE" }).then(reloadRules).catch(fail)} aria-label="Remove"><${I.trash} /></button></div>`)}</div>
     <form class="type-row" onSubmit=${(e) => { e.preventDefault(); api("/rules", { method: "POST", body: { match: newRule } }).then(() => { setNewRule(""); reloadRules(); }).catch(fail); }}>
       <input class="input" placeholder='e.g. "amazon" or "git push"' value=${newRule} onInput=${(e) => setNewRule(e.target.value)} /><button class="btn small primary" disabled=${!newRule.trim()}>Add</button>
+    </form>
+
+    <div class="section-title">Secrets</div>
+    <p class="hint" style="margin-top:0">Passwords and API keys, kept in this Mac's Keychain. Bots use them by name and never see the values; each use asks you first.</p>
+    ${secrets?.length
+      ? html`<div class="list">${secrets.map((x) => html`<div class="row"><div class="grow"><b>${x.name}</b><span>${x.note || "Saved"}${x.lastUsedAt ? ` · last used ${fmtDay(Date.parse(x.lastUsedAt))}` : ""}</span></div>
+          <button class="icon-btn" onClick=${() => confirm(`Delete the secret "${x.name}" from the Keychain?`) && api(`/secrets/${encodeURIComponent(x.name)}`, { method: "DELETE" }).then(reloadSecrets).catch(fail)} aria-label="Delete"><${I.trash} /></button></div>`)}</div>`
+      : null}
+    <form class="type-row" onSubmit=${addSecret}>
+      <input class="input" style="flex:0.8" placeholder="Name" value=${newSecret.name} onInput=${(e) => setNewSecret({ ...newSecret, name: e.target.value })} autocapitalize="off" />
+      <input class="input" type="password" autocomplete="off" placeholder="Value" value=${newSecret.value} onInput=${(e) => setNewSecret({ ...newSecret, value: e.target.value })} />
+      <button class="btn small primary" disabled=${!newSecret.name.trim() || !newSecret.value}>Save</button>
     </form>
 
     <div class="section-title">Connected apps</div>

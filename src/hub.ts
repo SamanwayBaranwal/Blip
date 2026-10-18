@@ -24,7 +24,7 @@ export type RunView = {
 
 export type CardButton = { label: string; value: string; style?: "primary" | "danger" | "default" };
 export type CardView = {
-  type: "approval" | "draft" | "takeover" | "suggestion";
+  type: "approval" | "draft" | "takeover" | "suggestion" | "secret";
   title: string;
   body: string;
   note?: string;

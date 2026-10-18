@@ -41,7 +41,7 @@ function renderRun(m: Msg) {
 
 function renderCard(m: Msg) {
   const c = m.card!;
-  const icon = { approval: "🔐", draft: "📝", takeover: "🖐", suggestion: "💡" }[c.type];
+  const icon = { approval: "🔐", draft: "📝", takeover: "🖐", suggestion: "💡", secret: "🔑" }[c.type];
   const body = c.draft ? `To: ${c.draft.to}${c.draft.subject ? `\nSubject: ${c.draft.subject}` : ""}\n\n${c.draft.body}` : c.body;
   return `${icon} ${nameTag(m.botId)}${c.title}\n${body}${c.note ? `\n\n${c.note}` : ""}${c.answer ? `\n\n→ ${c.answer}` : ""}`.slice(0, 4096);
 }
@@ -88,6 +88,11 @@ async function mirror(m: Msg) {
     if (tgId === undefined) {
       mirrored.set(m.id, 0);
       const keyboard = new InlineKeyboard();
+      // Secrets are only ever typed into the app's masked field, never into a Telegram chat.
+      if (c.type === "secret") {
+        const sent = await bot.api.sendMessage(config.ownerId, `${renderCard(m)}\n\nOpen the Blip app to enter it. Never type passwords into Telegram.`);
+        return void mirrored.set(m.id, sent.message_id);
+      }
       c.buttons.forEach((b, i) => {
         keyboard.text(b.label, `c:${m.id}:${b.value}`);
         if (i % 2 === 1) keyboard.row();
