@@ -9,6 +9,7 @@ import { acquireComputer } from "./computer.js";
 import type { CardButton } from "./hub.js";
 import { autoReview } from "./review.js";
 import { fillSecrets, hasSecret, placeholdersIn, saveSecret } from "./secrets.js";
+import { agentAddress } from "./email.js";
 import { audit, save, state, type BotProfile, type Rule } from "./store.js";
 
 // Tools that only look at things. They run without asking, and are all that read-only runs may use.
@@ -24,7 +25,7 @@ const READ_ONLY_SAFE = new Set([
 // Also safe outside read-only runs: delegating to teammates and the bot's own bookkeeping tools.
 const SAFE = new Set([
   ...READ_ONLY_SAFE, "Task", "Agent", "mcp__browser__browser_install",
-  "mcp__blip__send_to_phone", "mcp__blip__add_routine", "mcp__blip__add_event_routine", "mcp__blip__remove_routine", "mcp__blip__save_skill",
+  "mcp__blip__send_to_phone", "mcp__blip__create_page", "mcp__blip__hand_off", "mcp__blip__create_helper", "mcp__blip__add_routine", "mcp__blip__add_event_routine", "mcp__blip__remove_routine", "mcp__blip__save_skill",
 ]);
 // Tools that act on screens and pages as the user. These never get a permanent "Always allow": what they do
 // depends on *what* is clicked or typed, not the tool (Muse users had standing approvals share a home address).
@@ -38,6 +39,8 @@ const INTERACTIVE = new Set([
 // Built-in guard, enforced in code rather than by prompt: actions that look like sending, paying, deleting or
 // committing always come to the user, whatever the bot was told and whatever rules say.
 const COMMIT_WORDS = /\b(send|post|publish|submit|reply|forward|pay|payment|purchase|buy|order|checkout|check out|place order|confirm|delete|remove|cancel|unsubscribe|accept|agree|transfer|withdraw|book|reserve|sign up|subscribe|share)\b/i;
+// Social actions taken by a click (on X and elsewhere): they speak for the user in public, so they always ask.
+const SOCIAL_CLICK = /\b(like|unlike|repost|retweet|follow|unfollow|quote|reply|bookmark|subscribe|join)\b/i;
 const PAYMENT_WORDS = /\b(pay|payment|purchase|buy|order|checkout|check out|place order|transfer|withdraw|subscribe|card number|cvv)\b/i;
 const READ_TOOLS = new Set(["Read", "Glob", "Grep", "LS"]);
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
@@ -65,7 +68,12 @@ export type RunContext = {
   onWait?: (holderName: string | null) => void;
   /** Set once this engine has used the browser or screen (its Chrome may still be open). */
   usedComputer?: boolean;
+  /** The chat this task runs in: the bot's own, or a group. Cards go there. */
+  threadId?: string;
+  /** Working for another bot (hand_off): its own browser, and the screen and mouse stay with the lead. */
+  handoff?: boolean;
 };
+const chatOf = (ctx: { bot: BotProfile; threadId?: string }) => ctx.threadId ?? ctx.bot.id;
 
 /** Tools that drive the shared browser or the Mac's screen, so only one task at a time may use them. */
 /** A bot with its own browser only takes turns for the real screen and mouse, never for browsing. */
@@ -207,10 +215,11 @@ export function describeAction(toolName: string, input: Record<string, unknown>)
   return `${name.charAt(0).toUpperCase()}${name.slice(1).replace(/_/g, " ")}:\n${details.length > 700 ? details.slice(0, 700) + "…" : details}`;
 }
 
-async function draftCard(input: Record<string, unknown>, bot: BotProfile, signal: AbortSignal): Promise<PermissionResult> {
+async function draftCard(input: Record<string, unknown>, ctx: RunContext, signal: AbortSignal): Promise<PermissionResult> {
+  const bot = ctx.bot;
   const draft = { channel: String(input.channel ?? "message"), to: String(input.to ?? "?"), subject: input.subject ? String(input.subject) : undefined, body: String(input.body ?? "") };
   const answer = await askCard({
-    botId: bot.id,
+    botId: chatOf(ctx),
     type: "draft",
     title: `Draft ${draft.channel} to ${draft.to}`,
     body: draft.body,
@@ -230,9 +239,10 @@ async function draftCard(input: Record<string, unknown>, bot: BotProfile, signal
   return { behavior: "deny", message: "The user discarded this draft. Don't send it." };
 }
 
-async function takeoverCard(input: Record<string, unknown>, bot: BotProfile, signal: AbortSignal): Promise<PermissionResult> {
+async function takeoverCard(input: Record<string, unknown>, ctx: RunContext, signal: AbortSignal): Promise<PermissionResult> {
+  const bot = ctx.bot;
   const answer = await askCard({
-    botId: bot.id,
+    botId: chatOf(ctx),
     type: "takeover",
     title: "Your turn — take over the computer",
     body: String(input.reason),
@@ -250,12 +260,13 @@ async function takeoverCard(input: Record<string, unknown>, bot: BotProfile, sig
 }
 
 /** The masked card where the user types a password or key; it goes straight into the Keychain. */
-async function secretCard(input: Record<string, unknown>, bot: BotProfile, signal: AbortSignal): Promise<PermissionResult> {
+async function secretCard(input: Record<string, unknown>, ctx: RunContext, signal: AbortSignal): Promise<PermissionResult> {
+  const bot = ctx.bot;
   const name = String(input.name ?? "").trim();
   if (!name) return { behavior: "deny", message: "Give the secret a short name, like github-token." };
   if (hasSecret(name)) return { behavior: "allow", updatedInput: { ...input, status: "already saved" } };
   const answer = await askCard({
-    botId: bot.id,
+    botId: chatOf(ctx),
     type: "secret",
     title: `${bot.name} needs a secret: ${name}`,
     body: String(input.why ?? ""),
@@ -303,7 +314,7 @@ async function withSecrets(
   } else {
     const [title, ...detail] = describeAction(toolName, input).split("\n");
     const { value } = await askCard({
-      botId: ctx.bot.id,
+      botId: chatOf(ctx),
       type: "approval",
       title: `Use your secret “${names.join("”, “")}”: ${title!.replace(/:$/, "")}`,
       body: detail.join("\n"),
@@ -313,6 +324,7 @@ async function withSecrets(
       timeoutValue: "deny",
       signal: options.signal,
       remindAfterMs: REMINDERS_MS,
+      pushActions: ["deny"],
     });
     if (value === "deny") return deny("The user didn't allow using that secret here. Ask them what to do instead.");
     if (value === "task") ctx.taskAllows.add(key);
@@ -331,7 +343,7 @@ async function withSecrets(
 /** Take turns on the browser and screen with other bots working in parallel. Only once the action is
  *  allowed: a bot waiting hours on an approval card mustn't hold the computer meanwhile. */
 async function takeComputer(ctx: RunContext, toolName: string, decision: PermissionResult, signal: AbortSignal): Promise<PermissionResult> {
-  if (decision.behavior !== "allow" || !usesComputer(toolName, ctx.bot)) return decision;
+  if (decision.behavior !== "allow" || !usesComputer(toolName, ctx.handoff ? { ...ctx.bot, ownBrowser: true } : ctx.bot)) return decision;
   let waited = false;
   try {
     await acquireComputer({ runId: ctx.runId, botId: ctx.bot.id, botName: ctx.bot.name }, signal, (who) => {
@@ -394,6 +406,11 @@ function decider(ctx: RunContext): Decide {
     const connectorTool = rest.join("__");
     const connectorReadOnly = connectorName ? isReadTool(connectorTool) : false;
 
+    // A teammate doing a handed-off part can't take the screen: the lead may be using it (and waiting on this).
+    if (ctx.handoff && ((toolName.startsWith("mcp__blip__mac_") && toolName !== "mcp__blip__mac_screenshot") || toolName === "mcp__blip__request_takeover")) {
+      return deny("You're doing a part handed to you by another bot, so the Mac's screen isn't yours to use. Do what you can with the browser and other tools, and say in your reply which screen steps the lead should do.");
+    }
+
     // 1. Read-only runs (proactive check-ins) can look but never touch.
     if (ctx.readOnly) {
       if (READ_ONLY_SAFE.has(toolName) || connectorReadOnly) return allow("auto (read-only run)");
@@ -402,9 +419,17 @@ function decider(ctx: RunContext): Decide {
     }
 
     // 2. Cards that always involve the user.
-    if (toolName === "mcp__blip__propose_draft") return draftCard(input, ctx.bot, signal);
-    if (toolName === "mcp__blip__request_takeover") return takeoverCard(input, ctx.bot, signal);
-    if (toolName === "mcp__blip__request_secret") return secretCard(input, ctx.bot, signal);
+    if (toolName === "mcp__blip__propose_draft") return draftCard(input, ctx, signal);
+    if (toolName === "mcp__blip__request_takeover") return takeoverCard(input, ctx, signal);
+    if (toolName === "mcp__blip__request_secret") return secretCard(input, ctx, signal);
+    // Email from the agent's own address: always a draft the user approves (and can edit) first.
+    if (toolName === "mcp__blip__email_send") {
+      if (!agentAddress()) return deny("No agent email is set up. Ask the user to add one in Settings → Agent email.");
+      const r = await draftCard({ ...input, channel: `Email from ${agentAddress()}` }, ctx, signal);
+      if (r.behavior !== "allow") return r;
+      const { channel: _channel, ...edited } = r.updatedInput as Record<string, unknown>;
+      return { behavior: "allow", updatedInput: edited };
+    }
 
     // 3. Connector access level (Muse-style read-only / full access per app).
     if (connectorName) {
@@ -422,7 +447,8 @@ function decider(ctx: RunContext): Decide {
     const actsAsUser = INTERACTIVE.has(toolName) || (connectorName !== undefined && !connectorReadOnly);
     // A key combo with Enter plus a modifier (Ctrl/Cmd+Enter) sends in most mail and chat apps.
     const sendKey = /(ctrl|control|cmd|command|meta)\s*\+\s*(enter|return)/i.test(String(input.key ?? input.keys ?? ""));
-    const committing = actsAsUser && (COMMIT_WORDS.test(summary) || sendKey);
+    const socialClick = toolName === "mcp__browser__browser_click" && SOCIAL_CLICK.test(String(input.element ?? ""));
+    const committing = actsAsUser && (COMMIT_WORDS.test(summary) || sendKey || socialClick);
     const key = taskKey(toolName, input);
 
     // Full access (the user's choice in Settings): everything runs without asking except payments,
@@ -461,7 +487,7 @@ function decider(ctx: RunContext): Decide {
     buttons.push({ label: "Deny", value: "deny", style: "danger" });
     const [title, ...detail] = summary.split("\n");
     const { value: choice } = await askCard({
-      botId: ctx.bot.id,
+      botId: chatOf(ctx),
       type: "approval",
       title: `${title!.replace(/:$/, "").replace(/^browser /, "Browser: ")}`,
       body: detail.join("\n"),
@@ -471,6 +497,9 @@ function decider(ctx: RunContext): Decide {
       timeoutValue: "deny",
       signal,
       remindAfterMs: REMINDERS_MS,
+      // Allow straight from the notification only for ordinary actions; sending, paying, deleting and your
+      // own Ask-first rules are always looked at in the app.
+      pushActions: risky || askFirst ? ["deny"] : ["once", "deny"],
     });
     if (choice === "deny") return deny("The user denied this action from their phone. Don't retry it; ask them what to do instead.");
     if (choice === "task" && key) ctx.taskAllows.add(key);

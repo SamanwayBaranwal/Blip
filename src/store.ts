@@ -17,6 +17,9 @@ export type RoutineTrigger =
   | { kind: "folder"; path: string } // a new file appears in this folder
   | { kind: "mail"; from?: string; subject?: string }; // a new email in Mail.app matches
 
+/** A group chat: several bots in one conversation. The lead answers and hands parts to the others. */
+export type Group = { id: string; name: string; members: string[]; leadId: string; createdAt: string };
+
 export type BotProfile = {
   id: string;
   name: string;
@@ -27,7 +30,8 @@ export type BotProfile = {
   look?: BlipLook; // how this bot's Blip is dressed (avatar customization)
   quiet?: boolean; // deliver this bot's messages silently (no sound)
   spice?: "low" | "medium" | "high";
-  ownBrowser?: boolean; // its own Chrome (logins copied from the shared one), so it browses in parallel // how much personality: low = professional, medium (default), high = playful
+  ownBrowser?: boolean; // its own Chrome (logins copied from the shared one), so it browses in parallel
+  helper?: { createdBy: string; groupId?: string; lastUsedAt: string }; // made by a bot for a job; tidied away when unused // how much personality: low = professional, medium (default), high = playful
   sessionId?: string;
   contextTokens?: number; // size of the current conversation, for the context meter
   createdAt: string;
@@ -72,6 +76,9 @@ type State = {
   macAccess?: { calendar?: boolean; reminders?: boolean; contacts?: boolean; mail?: boolean; at?: string };
   lastProactiveDay?: string;
   skillOffers?: string[]; // requests Blip already offered to turn into a skill (not offered again)
+  groups: Group[];
+  groupSessions: Record<string, string>; // "<groupId>:<botId>" → that bot's conversation in that group
+  email?: import("./email.js").EmailSettings; // the agent's own email address (password in the Keychain)
   recentSuggestions: string[];
   dismissedSuggestions: string[];
   suggestionsByDay: Record<string, number>;
@@ -108,6 +115,8 @@ function load(): State {
     sessionTotals: {},
     secrets: [],
     health: {},
+    groups: [],
+    groupSessions: {},
   };
   if (!fs.existsSync(STATE_FILE)) return empty;
   try {
@@ -123,6 +132,10 @@ function load(): State {
 }
 
 export const state = load();
+
+/** The name of a chat (a bot's own chat, or a group). */
+export const chatName = (id: string) => state.bots.find((b) => b.id === id)?.name ?? state.groups.find((g) => g.id === id)?.name;
+export const isGroup = (id: string) => state.groups.some((g) => g.id === id);
 
 export function save() {
   const tmp = `${STATE_FILE}.tmp`;

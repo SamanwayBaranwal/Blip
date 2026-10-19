@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { query, type McpServerConfig, type Options, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { browserProfileFor, personaFor, teamAgents } from "./bots.js";
+import { browserProfileFor, personaFor } from "./bots.js";
 import { config } from "./config.js";
 import { setEngines } from "./computer.js";
 import { makeCanUseTool, makeSecretGate, type RunContext } from "./permissions.js";
@@ -111,11 +111,12 @@ class Session {
     remainingBudget: number | undefined,
     model: string,
     readonly userStarted: boolean,
+    readonly handoff = false,
   ) {
     this.model = model;
     this.sessionId = resume;
     this.exited = new Promise((r) => (this.markExited = r));
-    this.ctx = { bot, request: "", readOnly, taskAllows: new Set<string>(), runId: "" };
+    this.ctx = { bot, request: "", readOnly, taskAllows: new Set<string>(), runId: "", handoff };
     live.add(this);
     void this.exited.then(() => live.delete(this));
     // The agent's terminal never sees the Telegram token, and never inherits a parent Claude Code session's connection.
@@ -135,7 +136,7 @@ class Session {
       includePartialMessages: true, // stream the reply to the app as it's written
       settingSources: ["project"], // loads workspace/CLAUDE.md and skills; ignores this Mac's personal Claude Code settings
       systemPrompt: { type: "preset", preset: "claude_code", append: personaFor(bot, { readOnly }) },
-      agents: readOnly ? undefined : teamAgents(bot),
+      // Teammates are real bots now: they're reached with hand_off (visible in the chat, with their own memory).
       resume,
       abortController: this.abort,
       canUseTool: makeCanUseTool(this.ctx),
@@ -143,12 +144,12 @@ class Session {
       env,
       mcpServers: {
         ...connectorServers(),
-        blip: createBlipServer(bot, { background: !userStarted }), // chats the user starts may ask macOS; background runs never
+        blip: createBlipServer(bot, { background: !userStarted, context: () => this.ctx }), // chats the user starts may ask macOS; background runs never
         browser: {
           type: "stdio",
           command: process.execPath,
           args: [
-            config.playwrightCli, "--browser", "chrome", "--user-data-dir", browserProfileFor(bot), "--output-dir", `${config.workspace}/browser`,
+            config.playwrightCli, "--browser", "chrome", "--user-data-dir", browserProfileFor(handoff ? { ...bot, ownBrowser: true } : bot), // hand-offs never wait for the shared browser "--output-dir", `${config.workspace}/browser`,
             "--config", replay.configFile,
             // Background work (check-ins, routines) uses an invisible browser so windows never pop up while you
             // use the Mac; chats you start use a visible one you can watch. BLIP_BROWSER_HEADLESS hides it always.
@@ -203,7 +204,7 @@ class Session {
     request: string,
     handlers: Pick<Turn, "onStep" | "onPlan" | "onReply" | "onPartial">,
     userAbort: AbortSignal,
-    run: { runId: string; model: string; onWait?: (holder: string | null) => void; runMsgId?: string },
+    run: { runId: string; model: string; onWait?: (holder: string | null) => void; runMsgId?: string; threadId?: string },
   ): Promise<TurnResult> {
     clearTimeout(this.idleTimer);
     if (!this.alive) throw new Error("This bot's engine closed before it could start. Please send your message again.");
@@ -212,6 +213,7 @@ class Session {
     this.ctx.taskAllows = new Set<string>();
     this.ctx.runId = run.runId;
     this.ctx.onWait = run.onWait;
+    this.ctx.threadId = run.threadId;
     this.turnSent = false;
     // The turn exists (so the session counts as busy and nothing closes it) before any waiting below.
     const result = new Promise<TurnResult>((resolve, reject) => {
@@ -431,6 +433,8 @@ export function startAgent(params: {
   onReply: (text: string, isError: boolean, costSoFarUsd: number) => Promise<void>;
   onPartial?: (text: string) => void;
   runMsgId?: string;
+  threadId?: string; // the chat it runs in (a group, or the bot's own)
+  handoff?: boolean; // working for another bot: its own browser, no screen control
 }): AgentHandle {
   let session: Session | undefined;
   const done = (async (): Promise<TurnResult> => {
@@ -444,7 +448,7 @@ export function startAgent(params: {
     }
     const keepWarm = !!params.keepWarm && !params.readOnly && !usingKey; // a budgeted key session needs a fresh budget cap
     const existing = sessions.get(params.bot.id);
-    const reusable = keepWarm && existing?.alive && !existing.busy && !existing.retiring && !existing.readOnly && (!params.resume || existing.sessionId === params.resume);
+    const reusable = keepWarm && existing?.alive && !existing.busy && !existing.retiring && !existing.readOnly && existing.handoff === !!params.handoff && (!params.resume || existing.sessionId === params.resume);
     if (reusable) {
       session = existing!;
     } else {
@@ -458,10 +462,10 @@ export function startAgent(params: {
         console.error(`[${params.bot.name}] conversation ${resume} no longer exists; starting a fresh one (memory is kept)`);
         resume = undefined;
       }
-      session = new Session(params.bot, keepWarm, !!params.readOnly, resume, usingKey ? remaining : undefined, params.model, !!params.keepWarm && !params.readOnly);
+      session = new Session(params.bot, keepWarm, !!params.readOnly, resume, usingKey ? remaining : undefined, params.model, !!params.keepWarm && !params.readOnly, !!params.handoff);
       if (keepWarm) sessions.set(params.bot.id, session);
     }
-    return session.runTurn(params.prompt, params.request, params, params.abort.signal, { runId: params.runId, model: params.model, onWait: params.onWait, runMsgId: params.runMsgId });
+    return session.runTurn(params.prompt, params.request, params, params.abort.signal, { runId: params.runId, model: params.model, onWait: params.onWait, runMsgId: params.runMsgId, threadId: params.threadId });
   })();
 
   return {

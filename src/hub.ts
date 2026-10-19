@@ -22,11 +22,16 @@ export type RunView = {
   model?: string; // which model handled it (Auto picks per task)
   live?: string; // the reply as it's being written (never saved to disk)
   replay?: string; // a clip of what the bot did in the browser (path in the workspace)
+  bot?: string; // in a group chat: which bot this task belongs to
+  results?: RunResult[]; // what it made: files, events, reminders, skills, routines (shown as chips on the task)
 };
+
+/** Something a task produced, shown inline so you see it without reading the whole reply. */
+export type RunResult = { kind: "file" | "event" | "reminder" | "skill" | "routine"; title: string; sub?: string; path?: string };
 
 export type CardButton = { label: string; value: string; style?: "primary" | "danger" | "default" };
 export type CardView = {
-  type: "approval" | "draft" | "takeover" | "suggestion" | "secret";
+  type: "approval" | "draft" | "takeover" | "suggestion" | "secret" | "check"; // check: a failed double-check
   title: string;
   body: string;
   note?: string;
@@ -44,7 +49,7 @@ export type Msg = {
   kind: "text" | "run" | "card";
   text?: string;
   files?: string[]; // paths relative to the workspace
-  meta?: { costUsd?: number; seconds?: number; voice?: boolean; header?: string; feedback?: "up" | "down"; error?: boolean };
+  meta?: { costUsd?: number; seconds?: number; voice?: boolean; header?: string; feedback?: "up" | "down"; error?: boolean; from?: string }; // from: the bot speaking in a group
   run?: RunView;
   card?: CardView;
 };
@@ -115,7 +120,7 @@ process.on("exit", flush);
 
 export function addMessage(m: Omit<Msg, "id" | "at"> & { id?: string }): Msg {
   const msg: Msg = { ...m, id: m.id ?? randomUUID(), at: Date.now() };
-  if (!state.bots.some((b) => b.id === m.botId)) return msg; // the bot was deleted (e.g. a last "Stopped." note)
+  if (!state.bots.some((b) => b.id === m.botId) && !state.groups.some((g) => g.id === m.botId)) return msg; // deleted (e.g. a last "Stopped." note)
   thread(m.botId).push(msg);
   persistSoon(m.botId);
   events.emit("msg", msg);

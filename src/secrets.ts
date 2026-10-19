@@ -39,6 +39,9 @@ export async function saveSecret(rawName: string, value: string, note = "") {
   return name;
 }
 
+/** For Blip's own use (the agent email's password). Bots never get values, only placeholders. */
+export const readSecretValue = (name: string) => readSecret(cleanName(name));
+
 async function readSecret(name: string): Promise<string | undefined> {
   if (values.has(name)) return values.get(name);
   if (fakeKeychain) return fakeKeychain.get(name);

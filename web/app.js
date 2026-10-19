@@ -416,7 +416,23 @@ if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
 }
 
 // ============================================================ small components
+/** A group chat, shown like a bot: its members' avatars overlapping, the lead in front. */
+function groupAsBot(g, st) {
+  const members = g.members.map((id) => st.bots.find((b) => b.id === id)).filter(Boolean);
+  const lead = members.find((b) => b.id === g.leadId) || members[0];
+  return { id: g.id, name: g.name, group: g, members, lead, look: lead?.look, job: members.map((m) => m.name).join(", "), running: g.running, waiting: g.waiting, step: g.running ? "Working…" : null, model: lead?.model || "auto" };
+}
+const botById = (id) => store.state?.bots.find((b) => b.id === id);
+
 function Avatar({ bot, size = 34, status, still }) {
+  if (bot?.group) {
+    const [a, b] = [bot.lead, bot.members.find((m) => m.id !== bot.lead?.id)];
+    return html`<div class="avatar group-avatar" title=${bot.name} style=${`width:${size}px;height:${size}px`}>
+      ${b ? html`<span class="ga back"><${Blip} still tight look=${b.look} /></span>` : null}
+      <span class="ga front"><${Blip} still=${still} tight look=${a?.look} state=${status === "live" ? "working" : status === "wait" ? "needs" : "idle"} /></span>
+      ${status ? html`<span class=${`dot ${status}`} />` : null}
+    </div>`;
+  }
   const mood = status === "live" ? "working" : status === "wait" ? "needs" : "idle";
   return html`<div class="avatar" title=${bot?.name} style=${`width:${size}px;height:${size}px`}>
     <${Blip} state=${mood} still=${still} tight look=${bot?.look} />${status ? html`<span class=${`dot ${status}`} />` : null}
@@ -518,6 +534,20 @@ function Sidebar({ st, open, onSelect, onSheet, onClose }) {
         })}
       </div>
       <div>
+        <div class="side-label">Groups</div>
+        ${(st.groups || []).map((g) => {
+          const gb = groupAsBot(g, st);
+          const s = botStatus(gb, st);
+          const unread = store.unread[g.id];
+          return html`<button class=${`bot-row ${g.id === selected ? "active" : ""}`} onClick=${() => onSelect(g.id)}>
+            <${Avatar} bot=${gb} size=${36} status=${s.dot} />
+            <div class="meta"><div class="name">${g.name}</div><div class=${`sub ${s.cls}`}>${g.running ? s.text : gb.job}</div></div>
+            ${g.waiting ? html`<span class="badge" title="Waiting for you">${g.waiting}</span>` : unread ? html`<span class="badge neutral">${unread}</span>` : null}
+          </button>`;
+        })}
+        ${st.bots.length >= 2 ? html`<button class="nav-row" onClick=${() => onSheet({ type: "newgroup" })}><${I.plus} /> New group</button>` : null}
+      </div>
+      <div>
         <div class="side-label">Workspace</div>
         <button class="nav-row" onClick=${() => onSheet({ type: "routines" })}><${I.clock} /> Routines</button>
         <button class="nav-row" onClick=${() => onSheet({ type: "skills" })}><${I.book} /> Skills</button>
@@ -566,9 +596,13 @@ function Feedback({ m }) {
 function TextMsg({ m, bot, onImage }) {
   if (m.role === "system") return html`<div class="msg system"><div class="text" dangerouslySetInnerHTML=${{ __html: md(m.text || "") }} /></div>`;
   const user = m.role === "user";
+  // In a group (or when a teammate answers in your chat), each message shows who said it.
+  const speaker = (m.meta?.from && botById(m.meta.from)) || (bot.group ? bot.lead : bot);
+  const named = !user && (bot.group || (m.meta?.from && m.meta.from !== bot.id));
   return html`<div class=${`msg ${user ? "user" : "bot"}`}>
-    ${user ? null : html`<${Avatar} bot=${bot} size=${28} still />`}
+    ${user ? null : html`<${Avatar} bot=${speaker} size=${28} still />`}
     <div class="body">
+      ${named ? html`<div class="speaker">${speaker?.name}</div>` : null}
       ${m.meta?.header ? html`<div class="header-line">${m.meta.header}</div>` : null}
       ${m.text?.trim() ? html`<div class=${`text ${m.meta?.error ? "error" : ""}`} dangerouslySetInnerHTML=${{ __html: md(m.text) }} />` : null}
       <${Files} files=${m.files} onImage=${onImage} />
@@ -581,8 +615,9 @@ function TextMsg({ m, bot, onImage }) {
   </div>`;
 }
 
-function RunBlock({ m, bot }) {
+function RunBlock({ m, bot: chatBot }) {
   const r = m.run;
+  const bot = (r.bot && botById(r.bot)) || (chatBot.group ? chatBot.lead : chatBot); // whose task this is
   const live = r.status === "running" || r.status === "waiting";
   const [open, setOpen] = useState(null);
   const isOpen = open ?? live;
@@ -603,7 +638,7 @@ function RunBlock({ m, bot }) {
   return html`<div class=${`run ${live ? "live" : ""} ${r.status === "waiting" ? "waiting" : ""}`}>
     <button class="run-head" onClick=${() => setOpen(!isOpen)}>
       ${live ? html`<${Blip} size=${32} look=${bot?.look} state=${r.status === "waiting" ? "needs" : "working"} />` : html`<span class="state-dot" style=${r.status === "failed" ? "color:var(--danger)" : ""}><${stateIcon || I.okCircle} /></span>`}
-      <span class="label"><b class=${live && r.status !== "waiting" ? "shimmer" : ""}>${title}</b><span>${sub}</span></span>
+      <span class="label"><b class=${live && r.status !== "waiting" ? "shimmer" : ""}>${r.bot || chatBot.group ? `${bot?.name} · ` : ""}${title}</b><span>${sub}</span></span>
       ${live ? html`<span class="time">${r.model ? `${r.model} · ` : ""}${dur(elapsed)}</span>` : null}
       <span class=${`chev ${isOpen ? "open" : ""}`}><${I.chevron} /></span>
     </button>
@@ -913,13 +948,13 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
         ? html`<div class="attach-list">${files.map((f, i) => html`<span class="chip">${f.preview ? html`<img src=${f.preview} style="width:20px;height:20px;border-radius:4px;object-fit:cover" />` : html`<${I.clip} />`} ${f.name.slice(0, 24)}
             <button onClick=${() => { if (f.preview) URL.revokeObjectURL(f.preview); setFiles(files.filter((_, j) => j !== i)); }} aria-label="Remove">×</button></span>`)}</div>`
         : null}
-      <textarea ref=${ta} rows="1" placeholder=${running ? `Steer ${bot.name} while it works…` : `What should ${bot.name} do?`} value=${text} onInput=${(e) => setText(e.target.value)} onKeyDown=${onKey} />
+      <textarea ref=${ta} rows="1" placeholder=${bot.group ? (running ? "Steer the team while it works…" : `Message ${bot.name} (@Name asks one bot)`) : running ? `Steer ${bot.name} while it works…` : `What should ${bot.name} do?`} value=${text} onInput=${(e) => setText(e.target.value)} onKeyDown=${onKey} />
       <div class="composer-row">
         <button class="icon-btn" onClick=${() => fileInput.current.click()} aria-label="Attach"><${I.clip} /></button>
         <input type="file" multiple hidden ref=${fileInput} onChange=${pick} />
         <button class=${`icon-btn ${rec ? "rec" : ""}`} onPointerDown=${micDown} onPointerUp=${micUp} onPointerCancel=${micUp} onKeyDown=${(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), toggleMic())} onContextMenu=${(e) => e.preventDefault()} aria-label="Voice message (tap, or hold and talk)"><${I.mic} /></button>
         <button class=${`icon-btn ${talk ? "rec" : ""}`} onClick=${() => { if (!talk) speakText(""); setTalk(!talk); }} aria-label=${talk ? "End talk mode" : "Talk mode"} title="Talk mode: a hands-free conversation"><${I.wave} /></button>
-        <button class="chip btn" onClick=${onModel}>${shortModel(bot.model)}</button>
+        ${bot.group ? null : html`<button class="chip btn" onClick=${onModel}>${shortModel(bot.model)}</button>`}
         <span class="spacer" />
         ${running && empty
           ? html`<button class="send stop" onClick=${() => api("/stop", { method: "POST", body: { botId: bot.id } }).catch(fail)} aria-label="Stop"><${I.stop} /></button>`
@@ -1794,6 +1829,39 @@ function PairPhone() {
         </div>`}`;
 }
 
+/** The agent's own email address: people can email Blip, and it writes back (every email is a draft you approve). */
+function AgentEmail({ st }) {
+  const [data, reload] = useLoad(() => api("/email"), []);
+  const [form, setForm] = useState({ address: "", password: "", imapHost: "", smtpHost: "" });
+  const [known, setKnown] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const f = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  const checkPreset = () => form.address.includes("@") && api(`/email/preset?address=${encodeURIComponent(form.address)}`).then((r) => setKnown(r.known)).catch(() => {});
+  const save = (e) => {
+    e.preventDefault();
+    setBusy(true);
+    api("/email", { method: "POST", body: form })
+      .then(() => { toast("Connected. Your bot can now be emailed."); setForm({ address: "", password: "", imapHost: "", smtpHost: "" }); reload(); })
+      .catch(fail)
+      .finally(() => setBusy(false));
+  };
+  const email = data?.email;
+  return html`<div class="section-title">Agent email</div>
+    ${email
+      ? html`<div class="row"><div class="grow"><b>${email.address}</b><span>${email.bot} reads it · ${email.lastCheck ? (email.lastCheck.ok ? `checked ${fmtDay(Date.parse(email.lastCheck.at))}` : `last check failed: ${email.lastCheck.error}`) : "checks every 2 minutes"}</span></div>
+          <button class="btn small" onClick=${() => api("/email/check", { method: "POST" }).then((r) => { toast(r.found ? `${r.found} new email${r.found === 1 ? "" : "s"}` : "No new email"); reload(); }).catch(fail)}>Check now</button>
+          <button class="icon-btn" onClick=${() => confirm(`Disconnect ${email.address}?`) && api("/email", { method: "DELETE" }).then(reload).catch(fail)} aria-label="Disconnect"><${I.trash} /></button></div>
+        <p class="hint">People can email this address. ${email.bot} reads new mail, tells you what matters, and drafts replies. Nothing is sent until you approve the draft.</p>`
+      : html`<p class="hint" style="margin-top:0">Give your bot its own email address. Make a new mailbox for it (for example a new Gmail), turn on 2-step verification there, create an app password, and enter both here. Every email it sends is a draft you approve first.</p>
+        <form class="email-form" onSubmit=${save}>
+          <input id="email-address" class="input" type="email" placeholder="blip.yourname@gmail.com" value=${form.address} onInput=${f("address")} onBlur=${checkPreset} autocapitalize="off" />
+          <input id="email-password" class="input" type="password" placeholder="App password" value=${form.password} onInput=${f("password")} autocomplete="off" />
+          ${known ? null : html`<input id="email-imap" class="input" placeholder="IMAP server (e.g. imap.example.com)" value=${form.imapHost} onInput=${f("imapHost")} autocapitalize="off" />
+            <input id="email-smtp" class="input" placeholder="SMTP server (e.g. smtp.example.com)" value=${form.smtpHost} onInput=${f("smtpHost")} autocapitalize="off" />`}
+          <button class="btn small primary" disabled=${busy || !form.address || !form.password}>${busy ? "Connecting…" : "Connect"}</button>
+        </form>`}`;
+}
+
 /** Outage alerts: a ping link from a free uptime monitor, which alerts you when the Mac goes quiet. */
 function HeartbeatRow({ h, reload }) {
   const [url, setUrl] = useState("");
@@ -1943,6 +2011,8 @@ function SettingsSheet({ st, onClose }) {
     </form>
 
     <${HealthSection} />
+
+    <${AgentEmail} st=${st} />
 
     <div class="section-title">Connected apps</div>
     ${connectors?.length
@@ -2147,14 +2217,50 @@ function ChatView({ st, bot, onMenu, panel, setPanel, onSheet, onImage, setContr
       </button>
       <button class=${`icon-btn ${panel === "computer" ? "on" : ""}`} onClick=${() => togglePanel("computer")} aria-label="Computer" title="Computer"><${I.computer} /></button>
       <button class=${`icon-btn ${panel === "files" ? "on" : ""}`} onClick=${() => togglePanel("files")} aria-label="Files" title="Files"><${I.files} /></button>
-      <button class=${`icon-btn ${panel === "memory" ? "on" : ""}`} onClick=${() => togglePanel("memory")} aria-label="Memory" title="Memory"><${I.brain} /></button>
-      <button class="icon-btn" onClick=${() => onSheet({ type: "bot" })} aria-label="Bot settings" title="Bot settings"><${I.more} /></button>
+      ${bot.group ? null : html`<button class=${`icon-btn ${panel === "memory" ? "on" : ""}`} onClick=${() => togglePanel("memory")} aria-label="Memory" title="Memory"><${I.brain} /></button>`}
+      <button class="icon-btn" onClick=${() => onSheet({ type: "bot" })} aria-label=${bot.group ? "Group settings" : "Bot settings"} title=${bot.group ? "Group settings" : "Bot settings"}><${I.more} /></button>
     </header>
     <${InstallHint} />
     <${MessageList} bot=${bot} messages=${messages} onImage=${onImage} onTakeover=${() => { setPanel("computer"); setControl(true); }} />
-    ${fresh ? html`<div class="starters">${STARTERS.map((x) => html`<button class="starter" onClick=${() => starter(x)}>${x.label}</button>`)}</div>` : null}
+    ${fresh && !bot.group ? html`<div class="starters">${STARTERS.map((x) => html`<button class="starter" onClick=${() => starter(x)}>${x.label}</button>`)}</div>` : null}
     <${Composer} key=${bot.id} bot=${bot} st=${st} onModel=${() => onSheet({ type: "bot" })} preset=${preset} clearPreset=${() => setPreset(null)} />
   </main>`;
+}
+
+/** Make or edit a group chat: a name, 2 to 6 bots, and which one leads. */
+function GroupSheet({ st, group, onClose, onCreated, onDeleted }) {
+  const [name, setName] = useState(group?.name || "");
+  const [members, setMembers] = useState(group?.members || []);
+  const [lead, setLead] = useState(group?.leadId || "");
+  const [armed, setArmed] = useState(false);
+  const toggle = (id) => setMembers(members.includes(id) ? members.filter((m) => m !== id) : [...members, id]);
+  const leadId = members.includes(lead) ? lead : members[0];
+  const save = () => {
+    const body = { name, members, leadId };
+    (group ? api(`/groups/${group.id}`, { method: "PATCH", body }) : api("/groups", { method: "POST", body }))
+      .then((r) => (group ? loadState().then(() => { toast("Saved"); onClose(); }) : onCreated(r.id)))
+      .catch(fail);
+  };
+  const remove = () => {
+    if (!armed) return setArmed(true);
+    api(`/groups/${group.id}`, { method: "DELETE" }).then(loadState).then(onDeleted).catch(fail);
+  };
+  return html`<${Sheet} title=${group ? group.name : "New group"} onClose=${onClose}>
+    <p class="hint" style="margin-top:0">One chat with several bots. The lead answers and hands parts of the job to the others; they work at the same time and you watch it happen. Write "@Name" to ask one bot directly.</p>
+    <div class="field"><label>Name</label><input id="group-name" class="input" placeholder="e.g. Content team" value=${name} onInput=${(e) => setName(e.target.value)} /></div>
+    <div class="section-title">Bots (${members.length})</div>
+    <div class="list">${st.bots.map((b) => html`<label class="row group-pick">
+      <input type="checkbox" checked=${members.includes(b.id)} onChange=${() => toggle(b.id)} />
+      <${Avatar} bot=${b} size=${30} still />
+      <div class="grow"><b>${b.name}${b.helper ? html` <span class="chip" style="padding:0 6px;font-size:10.5px">Helper</span>` : null}</b><span>${b.job}</span></div>
+      ${members.includes(b.id) ? html`<button type="button" class=${`btn small ${leadId === b.id ? "primary" : ""}`} onClick=${(e) => { e.preventDefault(); setLead(b.id); }}>${leadId === b.id ? "Lead" : "Make lead"}</button>` : null}
+    </label>`)}</div>
+    <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
+      <button class="btn primary" disabled=${!name.trim() || members.length < 2 || members.length > 6} onClick=${save}>${group ? "Save" : "Create group"}</button>
+      ${group ? html`<button class="btn" onClick=${() => api(`/groups/${group.id}/fresh`, { method: "POST" }).then(() => { toast("New chat started for this group"); onClose(); }).catch(fail)}><${I.new} /> New chat</button>` : null}
+      ${group ? html`<button class=${`btn ${armed ? "danger" : ""}`} onClick=${remove}><${I.trash} /> ${armed ? "Tap again to delete" : "Delete group"}</button>` : null}
+    </div>
+  <//>`;
 }
 
 function Shell() {
@@ -2175,14 +2281,15 @@ function Shell() {
     return fromLink || localStorage.getItem("bot");
   });
 
-  const bot = st.bots.find((b) => b.id === botId) || st.bots.find((b) => b.id === st.activeBotId) || st.bots[0];
+  const group = (st.groups || []).find((g) => g.id === botId);
+  const bot = group ? groupAsBot(group, st) : st.bots.find((b) => b.id === botId) || st.bots.find((b) => b.id === st.activeBotId) || st.bots[0];
   selected = bot.id;
   const select = (id) => {
     setBotId(id);
     setSidebar(false);
     localStorage.setItem("bot", id);
     store.unread = { ...store.unread, [id]: 0 };
-    api(`/bots/${id}`, { method: "PATCH", body: { active: true } }).catch(() => {});
+    if (!id.startsWith("g-")) api(`/bots/${id}`, { method: "PATCH", body: { active: true } }).catch(() => {});
     emit();
   };
   useEffect(() => {
@@ -2214,7 +2321,9 @@ function Shell() {
     ${sheet?.type === "activity" ? html`<${ActivitySheet} onClose=${() => setSheet(null)} />` : null}
     ${sheet?.type === "settings" ? html`<${SettingsSheet} st=${st} onClose=${() => setSheet(null)} />` : null}
     ${sheet?.type === "newbot" ? html`<${NewBotSheet} onClose=${() => setSheet(null)} onCreated=${(id, custom) => loadState().then(() => { select(id); if (custom) setSheet({ type: "style" }); })} />` : null}
-    ${sheet?.type === "bot" ? html`<${BotSheet} bot=${bot} st=${st} onClose=${() => setSheet(null)} onStyle=${() => setSheet({ type: "style" })} />` : null}
+    ${sheet?.type === "bot" && !bot.group ? html`<${BotSheet} bot=${bot} st=${st} onClose=${() => setSheet(null)} onStyle=${() => setSheet({ type: "style" })} />` : null}
+    ${sheet?.type === "bot" && bot.group ? html`<${GroupSheet} st=${st} group=${bot.group} onClose=${() => setSheet(null)} onDeleted=${() => { setSheet(null); select(st.activeBotId); }} />` : null}
+    ${sheet?.type === "newgroup" ? html`<${GroupSheet} st=${st} onClose=${() => setSheet(null)} onCreated=${(id) => loadState().then(() => { setSheet(null); select(id); })} />` : null}
     ${sheet?.type === "style" ? html`<${StyleSheet} bot=${bot} onClose=${() => setSheet(null)} />` : null}
     ${control ? html`<${RemoteView} onClose=${() => setControl(false)} />` : null}
     ${lightbox ? html`<div class="lightbox" onClick=${() => setLightbox(null)}><img src=${lightbox} alt="" /></div>` : null}

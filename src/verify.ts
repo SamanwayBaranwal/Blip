@@ -1,6 +1,8 @@
 import { query } from "@anthropic-ai/claude-agent-sdk";
 import type { BotProfile } from "./store.js";
+import { askCard } from "./cards.js";
 import { config } from "./config.js";
+import { hooks } from "./hooks.js";
 import { post } from "./outbox.js";
 import { makeCanUseTool } from "./permissions.js";
 import { createBlipServer } from "./tools.js";
@@ -13,7 +15,7 @@ import { createBlipServer } from "./tools.js";
 const CHECKABLE = [
   "Write", "Edit", "MultiEdit", "NotebookEdit",
   "mcp__blip__calendar_add", "mcp__blip__reminders_add", "mcp__blip__add_routine", "mcp__blip__add_event_routine",
-  "mcp__blip__save_skill", "mcp__blip__send_to_phone",
+  "mcp__blip__save_skill", "mcp__blip__send_to_phone", "mcp__blip__create_page",
 ];
 export const isCheckable = (tools: string[]) => tools.some((t) => CHECKABLE.includes(t));
 
@@ -68,7 +70,22 @@ CAN'T CHECK: <why>`,
 export async function doubleCheck(bot: BotProfile, request: string, reply: string, steps: string[], model: string) {
   const v = await verifyTask(bot, request, reply, steps, model);
   if (v.verdict === "verified") post(bot.id, `Checked: ${v.reason.replace(/[.\s]+$/, "")}.`, { role: "system", push: false });
-  else if (v.verdict === "not verified") post(bot.id, `Double-check failed: ${v.reason.replace(/[.\s]+$/, "")}. Ask ${bot.name} to look again.`, { role: "system" });
+  else if (v.verdict === "not verified") {
+    // A card, not just a line: one tap sends the bot back to fix it.
+    const reason = v.reason.replace(/[.\s]+$/, "");
+    void askCard({
+      botId: bot.id,
+      type: "check",
+      title: `Double-check failed: ${reason}`.slice(0, 200),
+      body: `${bot.name} said it was done, but an independent check couldn't confirm it.`,
+      buttons: [{ label: `Ask ${bot.name} to fix it`, value: "fix", style: "primary" }, { label: "Dismiss", value: "dismiss" }],
+      pushActions: ["fix"],
+      timeoutMs: 24 * 3_600_000,
+      timeoutValue: "dismiss",
+    }).then(({ value }) => {
+      if (value === "fix") hooks.startTask(bot.id, `An independent double-check of your last task found a problem: ${reason}.\n\nThe original request was: ${request.slice(0, 1500)}\n\nLook again, fix it, and check the result yourself before saying it's done.`, "Fix after double-check");
+    });
+  }
   else console.log(`[${bot.name}] double-check skipped: ${v.reason}`);
   return v;
 }

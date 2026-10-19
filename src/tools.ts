@@ -13,6 +13,8 @@ import { addEventRoutine, addRoutine, describeRoutines, newWebhookToken, removeR
 import { cleanName } from "./secrets.js";
 import { searchMemory } from "./memory.js";
 import { cleanSkill, writeSkill } from "./skills.js";
+import { createPage } from "./pages.js";
+import { agentAddress, sendEmail } from "./email.js";
 import * as macdata from "./macdata.js";
 import { save, state, today, type BotProfile } from "./store.js";
 
@@ -42,7 +44,8 @@ async function runMacTool(fn: () => Promise<unknown>) {
 }
 
 /** In-process tools for one run: phone delivery, Mac control, routines, skills, drafts, takeovers, suggestions, connectors. */
-export function createBlipServer(bot: BotProfile, opts: { background?: boolean } = {}) {
+export function createBlipServer(bot: BotProfile, opts: { background?: boolean; context?: () => { threadId?: string } } = {}) {
+  const chatId = () => opts.context?.().threadId ?? bot.id;
   // Runs the user didn't start never pop a macOS permission dialog (nobody is there to answer it).
   const macTool = (fn: () => Promise<unknown>) => runMacTool(opts.background ? () => macdata.withoutPrompts(fn) : fn);
   return createSdkMcpServer({
@@ -92,6 +95,66 @@ export function createBlipServer(bot: BotProfile, opts: { background?: boolean }
         "Find files on this Mac with Spotlight, by name (and optionally by what's inside). Newest first. Private folders are never listed.",
         { query: z.string(), search_contents: z.boolean().optional() },
         async ({ query, search_contents }) => macTool(() => macdata.findFiles(query, { contents: search_contents })),
+      ),
+      tool(
+        "create_page",
+        "Make a polished document (report, brief, plan, letter) or a slide deck from Markdown. It's laid out in Blip's clean style, saved as a page plus a PDF, and sent to the user's chat. " +
+          "Markdown: # title, ## sections, lists, tables, > quotes, **bold**, images as ![alt](path in the workspace). For a deck, separate slides with a line containing only ---; the first slide is the title slide; keep each slide to a heading and 3-5 short points.",
+        {
+          title: z.string(),
+          kind: z.enum(["doc", "deck"]).describe("doc = document, deck = 16:9 slides"),
+          markdown: z.string(),
+          caption: z.string().optional().describe("One line for the chat, e.g. what it is and what to look at first"),
+        },
+        async ({ title, kind, markdown, caption }) => {
+          try {
+            const page = await createPage(title, markdown, kind, bot.name);
+            const files = [page.pdf, page.html].filter((f): f is string => !!f);
+            post(bot.id, caption ?? `${kind === "deck" ? `Deck: ${title} (${page.slides} slides)` : title}`, { files });
+            return text(`Made "${title}" and sent it to the user's chat: ${files.map((f) => path.relative(config.workspace, f)).join(", ")}.${page.pdf ? "" : " (No PDF: Google Chrome isn't installed on this Mac.)"}`);
+          } catch (error) {
+            return text(`Couldn't make the page: ${(error as Error).message}`, true);
+          }
+        },
+      ),
+      tool(
+        "email_send",
+        "Send an email from your own address (the agent email set up in Settings). The user always sees it as a draft first and can edit or discard it; it's only sent if they approve. Use reply_to with the Message-ID when answering an email.",
+        { to: z.string(), subject: z.string(), body: z.string(), reply_to: z.string().optional().describe("Message-ID of the email you're answering") },
+        async ({ to, subject, body, reply_to }) => {
+          try {
+            const sent = await sendEmail({ to, subject, body, inReplyTo: reply_to });
+            return text(`Sent from ${agentAddress()} to ${to} (${sent.messageId}).`);
+          } catch (error) {
+            return text(`Not sent: ${(error as Error).message}`, true);
+          }
+        },
+      ),
+      tool(
+        "hand_off",
+        "Hand part of a job to a teammate bot. It does that part as itself (its own skills and memory), visibly in this chat, while you wait; its result comes back to you. " +
+          "Several hand_off calls at once run in parallel. Give each a complete, self-contained task. The teammate gets its own browser but not the Mac's screen.",
+        { to: z.string().describe("The teammate's name"), task: z.string().describe("Exactly what to do and what to send back") },
+        async ({ to, task }) => {
+          try {
+            return text(await hooks.handOff({ fromId: bot.id, to, task, threadId: chatId() }));
+          } catch (error) {
+            return text((error as Error).message, true);
+          }
+        },
+      ),
+      tool(
+        "create_helper",
+        "Make a new helper bot for a job none of your teammates fits (e.g. 'Fact-checker: verifies every number against two sources'). It joins this chat's team; hand it work with hand_off. Helpers unused for a week are removed. At most 10 bots in total.",
+        { name: z.string().describe("Short, e.g. 'Fact-checker'"), job: z.string().describe("What it's for, in one or two lines") },
+        async ({ name, job }) => {
+          try {
+            const made = hooks.createHelper({ byId: bot.id, name, job, threadId: chatId() });
+            return text(`Made ${made}. Hand it work with hand_off (to: "${made}").`);
+          } catch (error) {
+            return text(`Couldn't make the helper: ${(error as Error).message}`, true);
+          }
+        },
       ),
       tool(
         "search_memory",
@@ -296,6 +359,7 @@ export function createBlipServer(bot: BotProfile, opts: { background?: boolean }
             title,
             body: why,
             buttons: [{ label: "Do it", value: "do", style: "primary" }, { label: "Not useful", value: "no" }],
+            pushActions: ["do"],
             timeoutMs: 24 * 60 * 60_000,
             timeoutValue: "ignored",
           }).then(({ value: choice }) => {

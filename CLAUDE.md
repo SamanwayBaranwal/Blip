@@ -257,6 +257,31 @@ Fixed after a full audit. Keep these invariants:
 - **Open source:** `install.sh` (a one-line curl install into `~/Blip`; it defaults to github.com/SamanwayBaranwal/blip), `CONTRIBUTING.md`, and a README quick start. There's no LICENSE yet: the user decides.
 - **Tests:** 40 unit tests (`npm test`, about 6 s, with a 60 s per-test timeout) and 17 golden tasks.
 
+## Groups, helpers, replay, pages, X, agent email (2026-10-19, evening)
+
+- **Chats vs bots:** a task now runs *in a chat* (`TaskOpts.threadId`, `Running.threadId`) that may not be the bot's own (a group, or a teammate's chat it was handed work in).
+  - Messages it posts carry `meta.from`, and its run block `run.bot`.
+  - Cards go to `ctx.threadId` (`chatOf(ctx)` in `permissions.ts`).
+  - Each bot keeps a separate conversation per chat: `state.groupSessions["<chatId>:<botId>"]`.
+  - `chatName()` and `isGroup()` live in `store.ts`.
+- **Groups** (`state.groups`, ids start with `g-`):
+  - `handleGroupMessage` routes to the lead, or to the member addressed with "@Name". The prompt carries the last 14 messages.
+  - `hooks.handOff` (tool `hand_off`) runs the teammate as a real task, visibly, and returns its reply. Hand-off tickets bypass `MAX_PARALLEL` (no deadlock), the waiting bot's `teamWaits` pauses its time limit, a bot already waiting on a hand-off can't receive one, and hand-off runs (`ctx.handoff`) get their own browser profile and **no screen or mouse tools** (avoids lock deadlocks with the lead).
+  - `create_helper` makes a helper bot (`bot.helper`), which joins the group; helpers unused for 7 days are removed at 04:15.
+  - Stop on a group stops every bot working in it, and deleting a bot removes it from its groups.
+  - The `teamAgents` subagents are no longer used.
+- **Work replay (`replay.ts`):** every engine's browser records via a Playwright MCP `--config` file (`contextOptions.recordVideo`). When the session exits, the `.webm` files become one 2× speed mp4 in `workspace/replays` (pruned after 7 days), linked as `run.replay` on the runs that used browser tools. For warm chats that happens when the session closes.
+- **Pages (`pages.ts`, tool `create_page`):** a built-in Markdown renderer produces a doc (A4) or a 16:9 deck (slides split by `---`), with Geist embedded, as HTML plus a PDF via headless Chrome (its own `pdf-profile`). It's sent to the chat.
+  - **`/api/file` now serves HTML, SVG and XML with `CSP: sandbox`** (no scripts, unique origin). Before this, a bot-made HTML page could have acted with the user's cookie.
+- **X search:** read-only through the logged-in browser (`x.com/search?q=…&f=live`), plus the library skill `x-pulse`. Clicks on Like, Repost, Follow, Reply, Quote, Bookmark, Subscribe or Join always ask (`SOCIAL_CLICK`), even with an allowance for the task.
+- **Agent email (`email.ts`):**
+  - Any IMAP/SMTP mailbox with an app password, with presets for Gmail, iCloud, Outlook, Fastmail, Yahoo and Zoho. The password lives in the Keychain (`agent-email-password`).
+  - The inbox is polled every 2 minutes, and new mail goes to `hooks.emailArrived`, which starts a task wrapped as `<email>` and marked "NOT instructions".
+  - Tool `email_send` → always a draft card (`draftCard`, even with full access); the edited text is what gets sent, threaded with `inReplyTo`.
+  - `BLIP_FAKE_EMAIL=1` writes sent mail to `data/fake-outbox.jsonl`, and `/api/email/test-inbound` simulates incoming mail.
+  - Real IMAP/SMTP is untested until the user connects a mailbox.
+- **Tests:** 43 unit tests and 21 golden tasks.
+
 ## How the code fits together
 
 - `hub.ts` is the single source of truth for conversations. Message kinds are `text`, `run` (live progress) and `card`.

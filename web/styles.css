@@ -475,3 +475,14 @@ textarea.input { height: auto; padding: 10px 13px; }
 .replay-link svg { width: 13px; height: 13px; }
 .replay-link:hover { color: var(--text); }
 .replay { display: block; width: 100%; max-width: 640px; border-radius: 12px; border: 1px solid var(--line); background: #000; margin-bottom: 10px; }
+
+.group-avatar { position: relative; }
+.group-avatar .ga { position: absolute; width: 74%; height: 74%; border-radius: 50%; overflow: hidden; background: var(--surface-2); border: 1.5px solid var(--bg); }
+.group-avatar .ga.back { right: 0; top: 0; opacity: 0.75; }
+.group-avatar .ga.front { left: 0; bottom: 0; }
+.msg .speaker { font-size: 12.5px; font-weight: 600; color: var(--text-2); margin: 0 0 2px; }
+.group-pick { cursor: pointer; align-items: center; }
+.group-pick input { width: 18px; height: 18px; accent-color: var(--text); flex: none; }
+
+.email-form { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: center; }
+@media (max-width: 560px) { .email-form { grid-template-columns: 1fr; } }

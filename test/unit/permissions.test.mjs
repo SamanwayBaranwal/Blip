@@ -125,3 +125,18 @@ test("secrets: unknown names are refused; known ones ask, then get filled in", a
   assert.match(used.result.updatedInput.command, /sk-test-1234567/);
   pick = () => "deny";
 });
+
+test("social clicks (like, repost, follow, reply) always ask, even with an allowance for this task", async () => {
+  pick = () => "deny";
+  const c = ctx();
+  c.taskAllows.add("mcp__browser__browser_click");
+  for (const element of ["Repost", "Like button", "Follow @someone", "Reply"]) {
+    const fn = makeCanUseTool(c);
+    lastCard = undefined;
+    const r = await fn("mcp__browser__browser_click", { element, ref: "e1" }, { signal: new AbortController().signal, toolUseID: "t" });
+    assert.equal(r.behavior, "deny", element);
+    assert.ok(lastCard, `${element} didn't ask`);
+  }
+  const ok = await makeCanUseTool(c)("mcp__browser__browser_click", { element: "Search results tab Latest", ref: "e2" }, { signal: new AbortController().signal, toolUseID: "t" });
+  assert.equal(ok.behavior, "allow");
+});

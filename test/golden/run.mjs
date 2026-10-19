@@ -18,7 +18,7 @@ const port = 8790 + Math.floor(Math.random() * 9);
 fs.writeFileSync(path.join(home, ".env"), `WEB_PORT=${port}\nMODEL=claude-haiku-5-5\nFAST_MODEL=claude-haiku-5-5\nREVIEW_MODEL=claude-haiku-5-5\nEFFORT=low\nPROACTIVE_SCHEDULE=0 0 1 1 *\n`);
 const env = {
   HOME: os.homedir(), USER: os.userInfo().username, LOGNAME: os.userInfo().username, PATH: process.env.PATH,
-  BLIP_DATA_ROOT: home, BLIP_TEST_KEYCHAIN: "memory", BLIP_INPUT_DRYRUN: "1", BLIP_SCREEN_TEST: "1", BLIP_BROWSER_HEADLESS: "1", BLIP_FAKE_MAC_DATA: "1",
+  BLIP_DATA_ROOT: home, BLIP_TEST_KEYCHAIN: "memory", BLIP_INPUT_DRYRUN: "1", BLIP_SCREEN_TEST: "1", BLIP_BROWSER_HEADLESS: "1", BLIP_FAKE_MAC_DATA: "1", BLIP_FAKE_EMAIL: "1",
   ...(process.env.ANTHROPIC_API_KEY ? { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY } : {}),
 };
 let log = "";
@@ -126,7 +126,7 @@ const tasks = {
   },
   async "Stop ends a long task quickly"() {
     const started = Date.now();
-    const r = await ask(main, "Run the shell command `sleep 60` in the foreground (not in the background) and wait for it, then say done.", {
+    const r = await ask(main, "Run this exact shell command in the foreground and wait for it to finish, then say done: for i in $(seq 1 60); do echo tick $i; sleep 1; done", {
       onCard: () => "once",
       during: async () => {
         await sleep(4000);
@@ -238,6 +238,78 @@ const tasks = {
     expect(replay, "no replay linked");
     const file = path.join(home, "workspace", replay);
     expect(fs.existsSync(file) && fs.statSync(file).size > 10_000, "replay file missing or empty");
+  },
+  async "pages: a bot makes a deck that arrives as a PDF, and pages open sandboxed"() {
+    const r = await ask(main, "Use create_page to make a 3-slide deck titled 'Gold in a war': a title slide, one slide of 3 bullet points about why gold fell, and a closing quote slide. Don't research, use general knowledge.", { onCard: () => "once" });
+    expect(r.status === "done", r.status);
+    const msg = (await thread(main)).filter((m) => m.files?.length).at(-1);
+    const pdf = msg?.files.find((f) => f.endsWith(".pdf"));
+    const page = msg?.files.find((f) => f.endsWith(".html"));
+    const steps = (await thread(main)).filter((m) => m.kind === "run").at(-1)?.run.steps.map((x) => x.text);
+    expect(pdf && page, `${JSON.stringify(msg?.files)} steps: ${JSON.stringify(steps)}`);
+    const res = await fetch(`${base}/api/file?path=${encodeURIComponent(page)}`, { headers: { cookie } });
+    expect(/sandbox/.test(res.headers.get("content-security-policy") ?? ""), "page isn't sandboxed");
+    expect((await res.text()).split('class="slide').length - 1 === 3, "not 3 slides");
+  },
+  async "group chat: the lead hands work to a teammate, @Name asks one bot, helpers can be made"() {
+    const { id: g } = await call("/groups", { name: "Test team", members: [main, second], leadId: main });
+    const groupRun = async (text, until, timeout = 240_000) => {
+      const before = new Set((await thread(g)).map((m) => m.id));
+      await call("/send", { botId: g, text });
+      const t0 = Date.now();
+      let fresh = [];
+      while (Date.now() - t0 < timeout) {
+        await sleep(600);
+        fresh = (await thread(g)).filter((m) => !before.has(m.id));
+        for (const m of fresh) if (m.kind === "card" && m.card.status === "pending") await call(`/card/${m.id}`, { value: "once" });
+        if (until(fresh) && !(await call("/state")).groups.find((x) => x.id === g).running) return fresh;
+      }
+      throw new Error(`timed out: ${JSON.stringify(fresh.map((m) => m.text ?? m.run?.label))}`);
+    };
+    const said = (fresh, botId) => fresh.filter((m) => m.kind === "text" && m.role === "bot" && (m.meta?.from ?? main) === botId).map((m) => m.text).join(" ");
+
+    // 1. Hand-off
+    let fresh = await groupRun("Use hand_off to ask Helper for the capital of France (one word). Then tell me its answer, starting with ANSWER=.", (f) => /ANSWER=/i.test(said(f, main)));
+    expect(fresh.some((m) => m.role === "system" && /→ Helper/.test(m.text ?? "")), "no visible hand-off");
+    expect(fresh.some((m) => m.kind === "run" && m.run.bot === second), "the teammate's work isn't shown in the group");
+    expect(/paris/i.test(said(fresh, second)), `teammate said: ${said(fresh, second)}`);
+    expect(/ANSWER=\s*paris/i.test(said(fresh, main)), `lead said: ${said(fresh, main)}`);
+
+    // 2. @Name
+    fresh = await groupRun("@Helper reply with just the word PONG", (f) => /PONG/.test(said(f, second)));
+    expect(!said(fresh, main), "the lead answered a message meant for Helper");
+
+    // 3. Helper bots
+    fresh = await groupRun('Use create_helper to make a helper named Checker (job: checks spelling). Then hand_off to Checker: "Correct the spelling of recieve, reply with just the word." Then tell me its answer starting with FIXED=.', (f) => /FIXED=/i.test(said(f, main)));
+    const checker = (await call("/state")).bots.find((b) => b.name === "Checker");
+    expect(checker?.helper, "no helper bot");
+    expect((await call("/state")).groups.find((x) => x.id === g).members.includes(checker.id), "helper didn't join the group");
+    expect(/receive/i.test(said(fresh, main)), said(fresh, main));
+    await call(`/bots/${checker.id}`, undefined, "DELETE");
+    await call(`/groups/${g}`, undefined, "DELETE");
+  },
+  async "agent email: mail to the bot becomes a task, and replies only go out as approved drafts"() {
+    await call("/email", { address: "blip.test@gmail.com", password: "app-password-1234" });
+    const before = new Set((await thread(main)).map((m) => m.id));
+    await call("/email/test-inbound", { from: "Raj <raj@example.com>", subject: "Is this address working?", text: "Hi Blip, I got this address from Sam. Is this the right way to reach you? Please reply with a quick hello so I know it works. - Raj" });
+    let draft, t0 = Date.now();
+    while (!draft && Date.now() - t0 < 180_000) {
+      await sleep(500);
+      draft = (await thread(main)).find((m) => !before.has(m.id) && m.kind === "card" && m.card.type === "draft" && m.card.status === "pending");
+    }
+    if (!draft) {
+      const fresh = (await thread(main)).filter((m) => !before.has(m.id));
+      throw new Error(`no draft card: ${JSON.stringify(fresh.map((m) => m.kind === "run" ? `RUN ${m.run.label} ${m.run.status} ${m.run.steps.map((x) => x.text).join(" / ")}` : `${m.role}: ${(m.text ?? m.card?.title ?? "").slice(0, 200)}`))}`);
+    }
+    expect(/raj@example\.com/i.test(draft.card.draft.to) && /email from blip\.test@gmail\.com/i.test(draft.card.draft.channel), JSON.stringify(draft.card.draft));
+    await call(`/card/${draft.id}`, { value: "send", body: "Hello Raj, yes, this address works. (edited by the user)" });
+    const outbox = path.join(home, "data", "fake-outbox.jsonl");
+    for (let i = 0; i < 60 && !fs.existsSync(outbox); i++) await sleep(500);
+    const sent = fs.existsSync(outbox) ? fs.readFileSync(outbox, "utf8").trim().split("\n").map((l) => JSON.parse(l)) : [];
+    expect(sent.length === 1, `${sent.length} emails sent`);
+    expect(/blip\.test@gmail\.com/.test(sent[0].from) && /raj@example\.com/.test(sent[0].to), JSON.stringify(sent[0]));
+    expect(/edited by the user/.test(sent[0].text), "the user's edit wasn't what got sent");
+    expect(/<test-/.test(sent[0].inReplyTo ?? ""), "not threaded as a reply");
   },
   async "two bots share the browser in turns"() {
     const q = "Use the browser to open https://example.com and tell me the page's main heading. Be brief.";

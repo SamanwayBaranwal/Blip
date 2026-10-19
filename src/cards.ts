@@ -1,18 +1,25 @@
 import { addMessage, findMessage, updateMessage, type CardButton, type CardView } from "./hub.js";
 import { push } from "./notify.js";
 import { post } from "./outbox.js";
-import { state } from "./store.js";
+import { chatName } from "./store.js";
 
 // Interactive cards (approvals, drafts, takeovers, suggestions) that pause work until the user answers,
 // from the app or from Telegram, whichever is first.
 
 export type CardAnswer = { value: string; body?: string };
-type Pending = { botId: string; type: CardView["type"]; resolve: (a: CardAnswer, note?: string) => void };
+type Pending = { botId: string; type: CardView["type"]; title: string; resolve: (a: CardAnswer, note?: string) => void };
 const pending = new Map<string, Pending>();
 
-/** Cards a task is paused on (approvals, drafts, takeovers). Suggestions don't pause anything. */
+const blocking = (t: CardView["type"]) => t !== "suggestion" && t !== "check";
+
+/** Cards a task is paused on (approvals, drafts, takeovers). Suggestions and double-check notes don't pause anything. */
 export function pendingCards(botId?: string) {
-  return [...pending.values()].filter((p) => p.type !== "suggestion" && (!botId || p.botId === botId)).length;
+  return [...pending.values()].filter((p) => blocking(p.type) && (!botId || p.botId === botId)).length;
+}
+
+/** Every unanswered card, newest last (for the app's "needs you" strip). */
+export function pendingList() {
+  return [...pending.entries()].map(([id, p]) => ({ id, botId: p.botId, type: p.type, title: p.title, blocking: blocking(p.type) }));
 }
 
 export async function askCard(input: {
@@ -27,6 +34,8 @@ export async function askCard(input: {
   timeoutValue: string;
   signal?: AbortSignal;
   remindAfterMs?: number[];
+  /** Buttons (by value) that can be tapped right on the phone notification, where the OS supports it. */
+  pushActions?: string[];
 }): Promise<CardAnswer> {
   if (input.signal?.aborted) return { value: input.timeoutValue }; // the task was stopped before the card went out
   const msg = addMessage({
@@ -35,8 +44,15 @@ export async function askCard(input: {
     kind: "card",
     card: { type: input.type, title: input.title, body: input.body, note: input.note, buttons: input.buttons, draft: input.draft, status: "pending" },
   });
-  const name = state.bots.find((b) => b.id === input.botId)?.name ?? "Your bot";
-  void push({ title: input.type === "suggestion" ? `${name} has a suggestion` : `${name} needs you`, body: input.title, botId: input.botId, tag: msg.id });
+  const name = chatName(input.botId) ?? "Your bot";
+  const actions = (input.pushActions ?? []).map((v) => input.buttons.find((b) => b.value === v)).filter((b): b is CardButton => !!b).slice(0, 2);
+  void push({
+    title: input.type === "suggestion" ? `${name} has a suggestion` : input.type === "check" ? `${name}: double-check failed` : `${name} needs you`,
+    body: input.title,
+    botId: input.botId,
+    tag: msg.id,
+    card: actions.length ? { id: msg.id, actions: actions.map((b) => ({ action: b.value, title: b.label })) } : undefined,
+  });
 
   return new Promise<CardAnswer>((resolve) => {
     const reminders = (input.remindAfterMs ?? []).map((ms) =>
@@ -56,7 +72,7 @@ export async function askCard(input: {
     };
     const timer = setTimeout(() => finish({ value: input.timeoutValue }, true), input.timeoutMs);
     input.signal?.addEventListener("abort", () => finish({ value: input.timeoutValue }, true), { once: true });
-    pending.set(msg.id, { botId: input.botId, type: input.type, resolve: (a) => finish(a) });
+    pending.set(msg.id, { botId: input.botId, type: input.type, title: input.title, resolve: (a) => finish(a) });
   });
 }
 

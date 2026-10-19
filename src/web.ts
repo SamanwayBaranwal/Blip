@@ -12,7 +12,7 @@ import {
 import { answerCard, pendingCards } from "./cards.js";
 import { config, setAnthropicKey } from "./config.js";
 import {
-  createBotFromTemplate, freshChat, giveFeedback, handleUserMessage, runProactive, runtime, setupRoutineTemplate, stopCurrent, testRoutine, type Attachment,
+  createBotFromTemplate, freshChat, giveFeedback, handleUserMessage, runProactive, runningIn, runtime, setupRoutineTemplate, stopCurrent, testRoutine, type Attachment,
 } from "./core.js";
 import { deleteThread, events, getThread, stateChanged, type Msg } from "./hub.js";
 import * as mac from "./mac.js";
@@ -22,6 +22,7 @@ import { deleteSecret, listSecrets, saveSecret } from "./secrets.js";
 import { backupNow, beat, checkMacAccess, health, recover, reset, selfTest } from "./health.js";
 import { startTeaching, stopTeaching, teachStatus } from "./teach.js";
 import * as skills from "./skills.js";
+import { checkInbox, emailSettings, fakeInbound, presetFor, removeEmail, setupEmail } from "./email.js";
 
 /** Input failing almost always means macOS hasn't given Blip permission to control the Mac. */
 const inputError = (error: unknown) =>
@@ -119,7 +120,7 @@ function appState() {
   const rt = runtime();
   return {
     bots: state.bots.map((b) => ({
-      id: b.id, name: b.name, emoji: b.emoji, job: b.job, style: b.style, quiet: !!b.quiet, look: b.look ?? {}, spice: b.spice ?? "medium", ownBrowser: !!b.ownBrowser,
+      id: b.id, name: b.name, emoji: b.emoji, job: b.job, style: b.style, quiet: !!b.quiet, look: b.look ?? {}, spice: b.spice ?? "medium", ownBrowser: !!b.ownBrowser, helper: !!b.helper,
       model: b.model ?? "auto", contextTokens: b.contextTokens ?? 0, spentToday: byBot[b.name] ?? 0,
       running: rt.running.some((r) => r.botId === b.id), step: rt.running.find((r) => r.botId === b.id)?.step ?? null,
       waiting: pendingCards(b.id), queued: rt.queued.filter((q) => q.botId === b.id).length,
@@ -136,6 +137,11 @@ function appState() {
     pushKey: pushPublicKey,
     authMode: config.anthropicKey ? "api" : "plan",
     teach: teachStatus(),
+    groups: state.groups.map((g) => ({
+      ...g,
+      running: rt.running.some((r) => g.members.includes(r.botId) && runningIn(r.botId) === g.id),
+      waiting: pendingCards(g.id),
+    })),
   };
 }
 
@@ -271,8 +277,94 @@ export function startWeb() {
     res.json({ ok: true });
   });
   api.get("/thread/:id", (req, res) => {
+    const id = String(req.params.id);
+    if (state.groups.some((g) => g.id === id)) return void res.json({ messages: getThread(id, 200) });
     const b = botOr404(req, res);
     if (b) res.json({ messages: getThread(b.id, 200) });
+  });
+
+  // ---- the agent's own email address
+  const emailView = () => {
+    const s = emailSettings();
+    return s ? { address: s.address, name: s.name, bot: getBot(s.botId)?.name ?? primaryBot().name, lastCheck: s.lastCheck ?? null, servers: `${s.imapHost} / ${s.smtpHost}` } : null;
+  };
+  api.get("/email", (_req, res) => void res.json({ email: emailView() }));
+  api.get("/email/preset", (req, res) => void res.json({ known: !!presetFor(str(req.query.address, 200)) }));
+  api.post("/email", async (req, res) => {
+    try {
+      await setupEmail({
+        address: str(req.body.address, 200), password: str(req.body.password, 300), name: str(req.body.name, 60) || undefined,
+        botId: str(req.body.botId) || undefined,
+        imapHost: str(req.body.imapHost, 200) || undefined, smtpHost: str(req.body.smtpHost, 200) || undefined,
+        imapPort: Number(req.body.imapPort) || undefined, smtpPort: Number(req.body.smtpPort) || undefined,
+      });
+      closeWarmSession(); // bots learn their address
+      res.json({ email: emailView() });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  });
+  api.delete("/email", async (_req, res) => {
+    await removeEmail();
+    closeWarmSession();
+    res.json({ ok: true });
+  });
+  api.post("/email/check", async (_req, res) => void res.json({ found: await checkInbox(), email: emailView() }));
+  api.post("/email/test-inbound", (req, res) => {
+    try {
+      fakeInbound({ from: str(req.body.from, 200), to: emailSettings()?.address ?? "", subject: str(req.body.subject, 300), date: new Date().toISOString(), text: str(req.body.text, 8000), messageId: `<test-${Date.now()}@example.com>` });
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  });
+
+  // ---- group chats: several bots in one conversation, a lead that hands work to the others
+  const cleanMembers = (ids: unknown) => [...new Set((Array.isArray(ids) ? ids : []).map(String))].filter((id) => getBot(id));
+  api.post("/groups", (req, res) => {
+    const members = cleanMembers(req.body.members);
+    const name = str(req.body.name, 40).trim();
+    if (!name) return void res.status(400).json({ error: "Give the group a name." });
+    if (members.length < 2 || members.length > 6) return void res.status(400).json({ error: "Pick 2 to 6 bots." });
+    const leadId = members.includes(str(req.body.leadId)) ? str(req.body.leadId) : members[0]!;
+    const g = { id: `g-${randomBytes(4).toString("hex")}`, name, members, leadId, createdAt: new Date().toISOString() };
+    state.groups.push(g);
+    save();
+    stateChanged();
+    res.json({ id: g.id });
+  });
+  api.patch("/groups/:id", (req, res) => {
+    const g = state.groups.find((x) => x.id === req.params.id);
+    if (!g) return void res.status(404).json({ error: "No such group." });
+    if (req.body.name) g.name = str(req.body.name, 40).trim() || g.name;
+    if (req.body.members) {
+      const members = cleanMembers(req.body.members);
+      if (members.length < 2 || members.length > 8) return void res.status(400).json({ error: "A group needs 2 to 8 bots." });
+      g.members = members;
+    }
+    if (req.body.leadId && g.members.includes(str(req.body.leadId))) g.leadId = str(req.body.leadId);
+    if (!g.members.includes(g.leadId)) g.leadId = g.members[0]!;
+    save();
+    stateChanged();
+    res.json({ ok: true });
+  });
+  api.post("/groups/:id/fresh", (req, res) => {
+    const g = state.groups.find((x) => x.id === req.params.id);
+    if (!g) return void res.status(404).json({ error: "No such group." });
+    for (const key of Object.keys(state.groupSessions)) if (key.startsWith(`${g.id}:`)) delete state.groupSessions[key];
+    for (const id of g.members) closeWarmSession(id);
+    save();
+    res.json({ ok: true });
+  });
+  api.delete("/groups/:id", (req, res) => {
+    const g = state.groups.find((x) => x.id === req.params.id);
+    if (!g) return void res.status(404).json({ error: "No such group." });
+    state.groups = state.groups.filter((x) => x.id !== g.id);
+    for (const key of Object.keys(state.groupSessions)) if (key.startsWith(`${g.id}:`)) delete state.groupSessions[key];
+    deleteThread(g.id);
+    save();
+    stateChanged();
+    res.json({ ok: true });
   });
 
   // Live updates (Server-Sent Events): new/updated messages and state changes.
@@ -296,10 +388,11 @@ export function startWeb() {
 
   // ---- chat
   api.post("/send", bigJson, (req, res) => {
-    const b = getBot(str(req.body.botId)) ?? activeBot();
+    const id = str(req.body.botId);
+    const to = state.groups.some((g) => g.id === id) ? id : (getBot(id) ?? activeBot()).id; // a bot, or a group chat
     const attachments = saveUploads(req.body.attachments);
     if (!str(req.body.text).trim() && !attachments.length) return void res.status(400).json({ error: "empty" });
-    handleUserMessage(str(req.body.text), { botId: b.id, attachments, voice: !!req.body.voice, source: "app" });
+    handleUserMessage(str(req.body.text), { botId: to, attachments, voice: !!req.body.voice, source: "app" });
     res.json({ ok: true });
   });
   api.post("/voice", bigJson, async (req, res) => {
@@ -373,6 +466,12 @@ export function startWeb() {
     try {
       deleteBot(b);
       stopCurrent(b.id);
+      // Out of its groups too; a group left with fewer than 2 bots is removed.
+      for (const g of state.groups) g.members = g.members.filter((id) => id !== b.id);
+      for (const g of state.groups.filter((x) => x.members.length < 2)) deleteThread(g.id);
+      state.groups = state.groups.filter((g) => g.members.length >= 2);
+      for (const g of state.groups) if (!g.members.includes(g.leadId)) g.leadId = g.members[0]!;
+      save();
       closeWarmSession(b.id);
       deleteThread(b.id);
       stateChanged();
@@ -546,6 +645,12 @@ export function startWeb() {
     const full = path.resolve(config.workspace, str(req.query.path, 1000));
     if (!inside(full, config.workspace) || isSensitive(full) || !fs.existsSync(full) || !fs.statSync(full).isFile()) return void res.sendStatus(404);
     if (req.query.download) res.attachment(path.basename(full));
+    // Files bots make are untrusted: a page or SVG opens sandboxed (no scripts, its own origin), so it can never
+    // act with the user's sign-in (approving cards, changing settings). Styles, images and fonts still show.
+    if (/\.(html?|svg|xml)$/i.test(full)) {
+      res.setHeader("Content-Security-Policy", "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data: blob: 'self'; font-src data:; media-src 'self'");
+    }
+    res.setHeader("X-Content-Type-Options", "nosniff");
     res.sendFile(full, { dotfiles: "allow" }); // the checks above already keep private files out
   });
 

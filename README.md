@@ -39,6 +39,11 @@ Want to add a skill, a tool or a connector? See [CONTRIBUTING.md](CONTRIBUTING.m
 - **Event triggers**: a routine can start from a private link (iPhone Shortcuts, scripts), a new file in a folder, or an email from a given sender, not only on a schedule.
 - **Teach by showing**: record yourself doing a task once (up to 10 minutes), and the bot writes it up as a skill you can read and edit.
 - **Own browser per bot** (optional): a bot can browse at the same time as the others instead of taking turns.
+- **Group chats**: put 2 to 6 bots in one chat. The lead hands parts of the job to the others, they work at the same time, and you watch every hand-off. Write "@Name" to ask one bot. Bots can also make **helper bots** for a job, which are tidied away after a week unused.
+- **Work replay**: every browser session is recorded, so you can watch what a bot did (at 2× speed) instead of watching it live.
+- **Pages**: bots make clean documents and slide decks, sent to your chat as a PDF.
+- **X, read-only**: bots search X through your logged-in browser and summarise what people are saying. They never like, repost, reply or follow without asking.
+- **Its own email address**: connect a mailbox you made for Blip and people can email your bot. It reads new mail, tells you what matters, and drafts replies you approve before anything is sent.
 - **Talk mode**: a hands-free conversation (it listens, answers out loud and listens again), or hold the mic to send a voice message. Speech is turned into text on the Mac itself.
 - **Double-checks its work**: after a task that changes files, your calendar, reminders, routines or skills, an independent checker confirms it really happened.
 - **Skills you can share**: export or import any skill as one `.md` file, every edit keeps the old version, and a library of examples comes with Blip. When you ask for the same thing three times, Blip offers to save it as a skill.
