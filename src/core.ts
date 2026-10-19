@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { startAgent, type AgentHandle } from "./agent.js";
+import { laneOf, startAgent, type AgentHandle } from "./agent.js";
 import { activeBot, appendMemory, createBot, deleteBot, findBot, getBot, listSkills, memoryFile, primaryBot, slug } from "./bots.js";
 import { askCard, pendingCards, pendingList } from "./cards.js";
 import { similarRequests } from "./memory.js";
@@ -29,7 +29,7 @@ type Running = {
   threadId: string; // the chat it runs in: the bot's own, or a group
   teamWaits: number; // hand-offs it's waiting on (that time doesn't count toward its limit)
 };
-type Ticket = { botId: string; label: string; routineId?: string; handoff?: boolean; start: () => Promise<void> };
+type Ticket = { botId: string; lane: string; threadId: string; label: string; routineId?: string; handoff?: boolean; start: () => Promise<void> };
 export type TaskOpts = {
   label: string; chat: boolean; readOnly?: boolean; quiet?: boolean; voice?: boolean; header?: string; routineId?: string; noPush?: boolean;
   testOf?: string; // a test run of this routine (counted as its last run, without the "already running" rule)
@@ -38,12 +38,12 @@ export type TaskOpts = {
 };
 export type TaskResult = { status: string; reply: string };
 const MAX_PARALLEL = Math.max(1, Number(process.env.MAX_PARALLEL || 3));
-const running = new Map<string, Running>(); // by bot id
+const running = new Map<string, Running>(); // by lane: one task per bot per chat (see laneOf)
 const waiting: Ticket[] = [];
 
 function pump() {
   for (const t of [...waiting]) {
-    if (running.has(t.botId)) continue;
+    if (running.has(t.lane)) continue;
     // Hand-offs always get to run: the bot that handed off is waiting for them (no deadlock at the limit).
     if (running.size >= MAX_PARALLEL && !t.handoff) continue;
     waiting.splice(waiting.indexOf(t), 1);
@@ -91,26 +91,31 @@ export function runtime() {
   return {
     current: list[0] ?? null,
     running: list,
-    queued: waiting.map(({ botId, label }) => ({ botId, label })),
+    queued: waiting.map(({ botId, label, threadId }) => ({ botId, label, threadId })),
     pendingCards: pendingCards(),
     pending: pendingList(),
     computer: computerHolder()?.botName ?? null,
   };
 }
 
-export const isRunning = (botId: string) => running.has(botId);
-/** Which chat a bot's current task is in (its own, or a group). */
-export const runningIn = (botId: string) => running.get(botId)?.threadId;
+/** Busy anywhere (its own chat, a group, a hand-off). */
+export const isRunning = (botId: string) => [...running.values()].some((r) => r.bot.id === botId);
 
-/** Stops one bot's task (and anything queued for it), or every task. */
-export function stopCurrent(botId?: string) {
-  // A group id stops every bot working in that group chat.
-  const targets = !botId ? [...running.values()] : isGroup(botId) ? [...running.values()].filter((r) => r.threadId === botId) : [running.get(botId)].filter((r): r is Running => !!r);
+/** Stops everything working in one chat (a bot's own, or a group) and what's queued there, or every task. */
+export function stopCurrent(chatId?: string) {
+  const targets = [...running.values()].filter((r) => !chatId || r.threadId === chatId);
   for (const r of targets) r.abort.abort();
   const before = waiting.length;
-  for (const t of [...waiting]) if (!botId || t.botId === botId) waiting.splice(waiting.indexOf(t), 1);
+  for (const t of [...waiting]) if (!chatId || t.threadId === chatId) waiting.splice(waiting.indexOf(t), 1);
   if (waiting.length !== before) stateChanged();
   return targets.length > 0 || waiting.length !== before;
+}
+
+/** Stops everything a bot is doing, in every chat (it's being deleted). */
+export function stopBot(botId: string) {
+  for (const r of running.values()) if (r.bot.id === botId) r.abort.abort();
+  for (const t of [...waiting]) if (t.botId === botId) waiting.splice(waiting.indexOf(t), 1);
+  stateChanged();
 }
 
 // New chat bumps a bot's generation, so a task that was still finishing can't put the old conversation back.
@@ -153,6 +158,8 @@ export function runTask(
   return new Promise((resolve) => {
     waiting.push({
       botId: b.id,
+      lane: laneOf(b.id, opts.threadId),
+      threadId: opts.threadId ?? b.id,
       label: opts.label,
       routineId: opts.routineId,
       handoff: opts.handoff,
@@ -181,7 +188,8 @@ async function execute(
   const model = chooseModel(b, request, opts);
   const r: Running = { label: opts.label, bot: b, abort, chat: opts.chat, step: "Starting…", startedAt: Date.now(), model, routineId: opts.routineId, threadId: thread, teamWaits: 0,
     kind: opts.routineId || opts.testOf ? "routine" : opts.readOnly ? "check-in" : opts.handoff ? "handoff" : opts.chat ? "chat" : "background" };
-  running.set(b.id, r);
+  const lane = laneOf(b.id, thread);
+  running.set(lane, r);
   stateChanged();
 
   // The live progress block in the chat (Grok Bot's steps panel).
@@ -234,6 +242,7 @@ async function execute(
     touch((v) => (v.live = livePending || undefined));
   };
 
+  let lastSaid: { id: string; text: string; at: number } | undefined;
   let status: RunView["status"] = "done";
   let lastReply = "";
   let toolsUsed: string[] = [];
@@ -268,6 +277,26 @@ async function execute(
         touch((v) => (v.plan = todos));
       },
       onResult: (made) => touch((v) => (v.results = [...(v.results ?? []), made].slice(-12))),
+      onShot: (file) => touch((v) => (v.shots = keepShots([...(v.shots ?? []), file]))),
+      // Talking while working: the first line ("On it: …") and answers to mid-task messages appear at once.
+      // Lines a few seconds apart are joined into one message, so it never turns into a stream of pings.
+      onSay: (text) => {
+        if (opts.readOnly || limitHit) return;
+        lastActivity = Date.now();
+        clearTimeout(liveTimer);
+        liveTimer = undefined;
+        touch((v) => (v.live = undefined));
+        const clean = text.trim();
+        if (!clean || clean === lastSaid?.text) return;
+        if (lastSaid && Date.now() - lastSaid.at < 12_000 && lastSaid.text.length + clean.length < 700) {
+          lastSaid = { ...lastSaid, text: `${lastSaid.text}\n\n${clean}`, at: Date.now() };
+          const id = lastSaid.id;
+          updateMessage(thread, id, (m) => (m.text = lastSaid!.text));
+        } else {
+          const m = post(thread, clean, { push: false, meta: { from, interim: true, voice: opts.voice } });
+          lastSaid = m ? { id: m.id, text: clean, at: Date.now() } : undefined;
+        }
+      },
       onWait: (holder) => {
         if (holder === null) return step("Got the computer");
         step(`Waiting for the computer: ${holder} is using it`);
@@ -318,7 +347,7 @@ async function execute(
   } finally {
     clearInterval(watchdog);
     clearTimeout(liveTimer);
-    running.delete(b.id);
+    running.delete(lane);
     await releaseComputer(runId).catch(() => {});
     if (limitHit && !opts.readOnly) {
       post(
@@ -339,6 +368,7 @@ async function execute(
       at: new Date(r.startedAt).toISOString(),
       bot: b.name,
       label: opts.label,
+      botId: b.id,
       routineId: opts.routineId ?? opts.testOf,
       status,
       costUsd,
@@ -401,11 +431,10 @@ export function handleUserMessage(text: string, opts: { botId?: string; voice?: 
   if (group) return handleGroupMessage(group, text, opts);
   let target = getBot(opts.botId) ?? activeBot();
   let body = text.trim();
-  const mention = /^@(\S+)\s+([\s\S]+)$/.exec(body);
-  const mentioned = mention ? findBot(mention[1]!) : undefined;
-  if (mentioned) {
-    target = mentioned;
-    body = mention![2]!;
+  const mention = guessMention(body, state.bots);
+  if (mention?.bot) {
+    target = mention.bot;
+    body = mention.rest;
   }
   const files = (opts.attachments ?? []).map((a) => a.path);
   addMessage({ botId: target.id, role: "user", kind: "text", text: body, files: files.map((f) => path.relative(config.workspace, f)), meta: { voice: opts.voice } });
@@ -414,17 +443,78 @@ export function handleUserMessage(text: string, opts: { botId?: string; voice?: 
   const fullText = [skillCommand(body) ?? body, fileNotes].filter(Boolean).join("\n\n") || "(see attachment)";
 
   // Steering: a message for the bot that's mid-task goes straight into that task.
-  const cur = running.get(target.id);
+  const cur = running.get(laneOf(target.id));
   if (cur?.chat && !files.length && cur.handle?.steer(fullText)) return;
 
   const images = (opts.attachments ?? []).filter((a) => a.mediaType && fs.existsSync(a.path) && fs.statSync(a.path).size < 4_500_000);
+  const asked = `${fullText}\n\n${TALK_FIRST}`;
   const prompt: Content = images.length
     ? [
-        { type: "text", text: fullText },
+        { type: "text", text: asked },
         ...images.map((a) => ({ type: "image" as const, source: { type: "base64" as const, media_type: a.mediaType as "image/png" | "image/jpeg", data: fs.readFileSync(a.path).toString("base64") } })),
       ]
-    : fullText;
+    : asked;
   runTask(target, prompt, fullText, { label: body.slice(0, 60) || "attachment", chat: true, voice: opts.voice || state.settings.voiceReplies });
+}
+
+// Put on every chat message (models follow it far more reliably there than in the persona): the user gets a
+// first line within seconds instead of silence until the whole job is done.
+const TALK_FIRST = "[If this needs tools or will take more than a few seconds: before your first tool call, write one short line telling the user what you're about to do. They see it right away.]";
+
+/**
+ * "@Name message" addresses one bot. Names can have spaces ("@Blip 2 do this"), so the longest name that fits
+ * wins; "@blip-2" and "@Blip2" work too.
+ */
+export function mentionOf(body: string, bots: BotProfile[]): { bot: BotProfile; rest: string } | undefined {
+  if (!body.startsWith("@")) return undefined;
+  const after = body.slice(1);
+  const lower = after.toLowerCase();
+  for (const b of [...bots].sort((x, y) => y.name.length - x.name.length)) {
+    const name = b.name.toLowerCase();
+    if (!lower.startsWith(name)) continue;
+    const next = after.charAt(name.length);
+    if (next && !/[\s,:;!?.]/.test(next)) continue; // "@Blipster" isn't "@Blip"
+    const rest = after.slice(name.length).replace(/^[\s,:;]+/, "").trim();
+    if (rest) return { bot: b, rest };
+  }
+  const word = /^(\S+)\s+([\s\S]+)$/.exec(after);
+  const squash = (t: string) => slug(t).replace(/-/g, "");
+  const bySlug = word && bots.find((b) => squash(b.name) === squash(word[1]!));
+  return bySlug ? { bot: bySlug, rest: word![2]!.trim() } : undefined;
+}
+
+const editDistance = (a: string, b: string) => {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)] as number[]);
+  for (let j = 1; j <= b.length; j++) d[0]![j] = j;
+  for (let i = 1; i <= a.length; i++)
+    for (let j = 1; j <= b.length; j++) d[i]![j] = Math.min(d[i - 1]![j]! + 1, d[i]![j - 1]! + 1, d[i - 1]![j - 1]! + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length]![b.length]!;
+};
+
+/**
+ * Who a message is for, forgiving the way people actually type: "@Scout …" (exact), "@scot …" (a typo:
+ * close enough to one name), and "Scout, …" or "Scout: …" (no @ at all). `typed` is set when an @name
+ * matched nobody, so the lead can work out who was meant.
+ */
+export function guessMention(body: string, bots: BotProfile[]): { bot?: BotProfile; rest: string; fuzzy?: boolean; typed?: string } | undefined {
+  const exact = mentionOf(body, bots);
+  if (exact) return exact;
+  const text = body.trim();
+  const at = /^@(\S+)\s+([\s\S]+)$/.exec(text);
+  if (at) {
+    const typed = slug(at[1]!).replace(/-/g, "");
+    const scored = bots.map((b) => ({ b, d: editDistance(typed, slug(b.name).replace(/-/g, "")) })).sort((x, y) => x.d - y.d);
+    const best = scored[0];
+    const allowed = best && (slug(best.b.name).replace(/-/g, "").length <= 4 ? 1 : 2);
+    const clear = best && best.d <= allowed! && (scored.length < 2 || scored[1]!.d > best.d);
+    return clear ? { bot: best!.b, rest: at[2]!.trim(), fuzzy: true } : { rest: at[2]!.trim(), typed: at[1] };
+  }
+  for (const b of [...bots].sort((x, y) => y.name.length - x.name.length)) {
+    if (!text.toLowerCase().startsWith(b.name.toLowerCase())) continue;
+    const after = text.slice(b.name.length);
+    if (/^\s*[,:]\s*\S/.test(after)) return { bot: b, rest: after.replace(/^\s*[,:]\s*/, ""), fuzzy: true };
+  }
+  return undefined;
 }
 
 /** "/expense-report March receipts" runs that skill (the app's "/" menu). Anything else is left alone. */
@@ -449,26 +539,30 @@ const nameOf = (id: string) => getBot(id)?.name ?? "a deleted bot";
 function handleGroupMessage(g: Group, text: string, opts: { voice?: boolean; attachments?: Attachment[] }) {
   let body = text.trim();
   const members = g.members.map((id) => getBot(id)).filter((b): b is BotProfile => !!b);
-  const mention = /^@(\S+)\s+([\s\S]+)$/.exec(body);
-  const addressed = mention ? members.find((m) => slug(m.name) === slug(mention[1]!)) : undefined;
-  if (addressed) body = mention![2]!;
+  const mention = guessMention(body, members);
+  const addressed = mention?.bot;
+  if (mention?.bot) body = mention.rest;
   const target = addressed ?? getBot(g.leadId) ?? members[0];
   const files = (opts.attachments ?? []).map((a) => a.path);
   // Recent messages, so a bot joining in knows the conversation (each keeps its own memory of this group too).
   const recent = getThread(g.id, 14)
     .filter((m) => m.kind === "text" && m.text)
     .map((m) => `${m.role === "user" ? "User" : m.role === "system" ? "Note" : nameOf(m.meta?.from ?? "")}: ${m.text!.replace(/\s+/g, " ").slice(0, 300)}`);
-  addMessage({ botId: g.id, role: "user", kind: "text", text: body, files: files.map((f) => path.relative(config.workspace, f)), meta: { voice: opts.voice } });
+  // The chat shows exactly what you typed ("@Scout …"); a guessed name gets a small note so you know who has it.
+  addMessage({ botId: g.id, role: "user", kind: "text", text: text.trim(), files: files.map((f) => path.relative(config.workspace, f)), meta: { voice: opts.voice } });
+  if (addressed && mention?.fuzzy) addMessage({ botId: g.id, role: "system", kind: "text", text: `Sent to ${addressed.name}.` });
   if (!target) return;
   const fileNotes = files.map((f) => `[The user attached a file, saved at: ${f}]`).join("\n");
   const fullText = [skillCommand(body) ?? body, fileNotes].filter(Boolean).join("\n\n") || "(see attachment)";
-  const cur = running.get(target.id);
-  if (cur?.chat && cur.threadId === g.id && !files.length && cur.handle?.steer(fullText)) return;
+  const cur = running.get(laneOf(target.id, g.id));
+  if (cur?.chat && !files.length && cur.handle?.steer(fullText)) return;
   const team = members.filter((m) => m.id !== target.id).map((m) => `${m.name} (${m.job})`).join("; ");
   const role = addressed && target.id !== g.leadId
     ? `The user is asking you directly. ${nameOf(g.leadId)} leads this group.`
-    : `You lead this group. Hand parts to teammates with hand_off: they work at the same time, as themselves, visibly in this chat, and their results come back to you. If nobody fits, create_helper makes a helper bot. Then give the user the combined answer.`;
-  const prompt = `[Group chat "${g.name}". Team: ${team || "just you"}. ${role}]\n${recent.length ? `Recent messages:\n${recent.join("\n")}\n\n` : ""}User: ${fullText}`;
+    : `You lead this group. Hand parts to teammates with hand_off: they work at the same time, as themselves, visibly in this chat, and their results come back to you. If nobody fits, create_helper makes a helper bot. Then give the user the combined answer.${
+        mention?.typed ? ` The user wrote "@${mention.typed}", but no teammate has that name: work out who they meant and hand it to them (or do it yourself), and say who has it.` : " The user didn't tag anyone: if the message is clearly for a teammate (by name or by their job), hand it to them rather than doing it yourself."
+      }`;
+  const prompt = `[Group chat "${g.name}". Team: ${team || "just you"}. ${role}]\n${recent.length ? `Recent messages:\n${recent.join("\n")}\n\n` : ""}User: ${fullText}\n\n${TALK_FIRST}`;
   void runTask(target, prompt, fullText, { label: body.slice(0, 60) || "attachment", chat: true, threadId: g.id, voice: opts.voice || state.settings.voiceReplies });
 }
 
@@ -480,9 +574,9 @@ hooks.handOff = async ({ fromId, to, task, threadId }) => {
   const mate = pool.find((b) => slug(b.name) === slug(to));
   if (!mate) throw new Error(`There's no teammate called "${to}". Teammates: ${pool.filter((b) => b.id !== from.id).map((b) => b.name).join(", ") || "none (use create_helper)"}.`);
   if (mate.id === from.id) throw new Error("That's you. Do it yourself, or hand it to someone else.");
-  if ((running.get(mate.id)?.teamWaits ?? 0) > 0) throw new Error(`${mate.name} is waiting on a hand-off itself right now. Do this part yourself, or try again shortly.`);
+  if ((running.get(laneOf(mate.id, threadId))?.teamWaits ?? 0) > 0) throw new Error(`${mate.name} is waiting on a hand-off itself right now. Do this part yourself, or try again shortly.`);
   addMessage({ botId: threadId, role: "system", kind: "text", text: `${from.name} → ${mate.name}: ${task.replace(/\s+/g, " ").slice(0, 240)}` });
-  const me = running.get(from.id);
+  const me = running.get(laneOf(from.id, threadId));
   if (me) me.teamWaits++;
   try {
     const result = await runTask(
@@ -513,7 +607,7 @@ hooks.createHelper = ({ byId, name, job, threadId }) => {
 // Helper bots that haven't been used for a week are removed (their memory file stays, as for any bot).
 scheduleInternal("15 4 * * *", () => {
   const cutoff = Date.now() - 7 * 86_400_000;
-  for (const b of state.bots.filter((x) => x.helper && Date.parse(x.helper.lastUsedAt) < cutoff && !running.has(x.id))) {
+  for (const b of state.bots.filter((x) => x.helper && Date.parse(x.helper.lastUsedAt) < cutoff && !isRunning(x.id))) {
     if (state.bots.length <= 1) break;
     for (const g of state.groups) g.members = g.members.filter((id) => id !== b.id);
     deleteBot(b);
@@ -576,11 +670,81 @@ export function setupRoutineTemplate(key: string, botId?: string) {
   return true;
 }
 
+/** At most 8 screenshots per task: the first, the newest, and evenly spread ones between (others are deleted). */
+export function keepShots(list: string[], max = 8) {
+  if (list.length <= max) return list;
+  const drop = list[Math.floor(list.length / 2)]!;
+  fs.rmSync(path.join(config.workspace, drop), { force: true });
+  return list.filter((f) => f !== drop);
+}
+
+// Your own templates: a bot saved as a starting point (name, job, style, look, model, personality).
+const TEMPLATE_DIR = () => path.join(config.dataDir, "templates");
+type CustomTemplate = { label: string; name: string; job: string; style: string; look?: Record<string, string>; model?: string; spice?: BotProfile["spice"] };
+export function customTemplates(): (CustomTemplate & { key: string })[] {
+  try {
+    return fs.readdirSync(TEMPLATE_DIR()).filter((f) => f.endsWith(".json")).map((f) => ({ key: `custom:${f.slice(0, -5)}`, ...(JSON.parse(fs.readFileSync(path.join(TEMPLATE_DIR(), f), "utf8")) as CustomTemplate) }));
+  } catch {
+    return [];
+  }
+}
+export function saveAsTemplate(b: BotProfile) {
+  fs.mkdirSync(TEMPLATE_DIR(), { recursive: true });
+  const t: CustomTemplate = { label: b.name, name: b.name, job: b.job, style: b.style, look: b.look as Record<string, string> | undefined, model: b.model, spice: b.spice };
+  fs.writeFileSync(path.join(TEMPLATE_DIR(), `${slug(b.name) || b.id}.json`), JSON.stringify(t, null, 1));
+  return `custom:${slug(b.name) || b.id}`;
+}
+export function deleteTemplate(key: string) {
+  const name = key.replace(/^custom:/, "");
+  if (!/^[\w-]+$/.test(name)) throw new Error("No such template.");
+  fs.rmSync(path.join(TEMPLATE_DIR(), `${name}.json`), { force: true });
+}
+const freeName = (name: string) => {
+  if (!findBot(name)) return name;
+  for (let i = 2; ; i++) if (!findBot(`${name} ${i}`)) return `${name} ${i}`;
+};
+
+/** A copy of a bot: same job, style, look, model and personality, and a copy of what it remembers. */
+export function duplicateBot(src: BotProfile) {
+  const nb = createBot(freeName(src.name), src.job, src.style);
+  Object.assign(nb, { look: { ...src.look, color: nb.look?.color ?? src.look?.color }, model: src.model, spice: src.spice, quiet: src.quiet }); // its own color, so the two are easy to tell apart
+  try {
+    const memory = fs.readFileSync(memoryFile(src), "utf8").replace(/^# .*'s memory/, `# ${nb.name}'s memory`);
+    fs.writeFileSync(memoryFile(nb), memory);
+  } catch {}
+  save();
+  post(nb.id, `I'm ${nb.name}, a copy of ${src.name}: same job, style and memory, with a fresh chat.`, { push: false });
+  stateChanged();
+  return nb;
+}
+
+/** What each bot did today, from the task history (no model call). */
+export function todaySummary() {
+  const day = new Date().toLocaleDateString("en-CA", { timeZone: config.timezone });
+  const mine = state.runs.filter((r) => new Date(r.at).toLocaleDateString("en-CA", { timeZone: config.timezone }) === day);
+  return state.bots.map((b) => {
+    const runs = mine.filter((r) => (r.botId ? r.botId === b.id : r.bot === b.name));
+    return {
+      botId: b.id,
+      tasks: runs.length,
+      done: runs.filter((r) => r.status === "done" || r.status === "nothing new").length,
+      failed: runs.filter((r) => r.status === "failed").length,
+      minutes: Math.round(runs.reduce((n, r) => n + r.seconds, 0) / 60),
+      costUsd: runs.reduce((n, r) => n + r.costUsd, 0),
+      recent: runs.slice(-3).reverse().map((r) => ({ label: r.label, status: r.status, at: r.at })),
+    };
+  });
+}
+
 export function createBotFromTemplate(key: string) {
-  const t = BOT_TEMPLATES[key];
+  const t = key.startsWith("custom:") ? customTemplates().find((c) => c.key === key) : BOT_TEMPLATES[key];
   if (!t) throw new Error("Unknown template");
-  const nb = createBot(findBot(t.name) ? `${t.name} ${state.bots.length + 1}` : t.name, t.job, t.style);
-  if (t.look) nb.look = { ...t.look };
+  const nb = createBot(freeName(t.name), t.job, t.style);
+  if (t.look) nb.look = { ...nb.look, ...t.look };
+  const extra = t as Partial<CustomTemplate>;
+  if (extra.model) nb.model = extra.model;
+  if (extra.spice) nb.spice = extra.spice;
+  save();
   post(nb.id, `Hi! I'm ${nb.name}. ${nb.job}\n\nTell me a bit about what you need and I'll get going.`, { push: false });
   stateChanged();
   return nb;
@@ -681,7 +845,7 @@ scheduleInternal(config.proactiveSchedule, () => void runProactive());
 /** One check-in. `now` (the user tapped "Check now") skips the on/off and once-a-day rules. */
 export async function runProactive(opts: { now?: boolean } = {}) {
   const b = primaryBot();
-  if (running.has(b.id) || waiting.some((t) => t.botId === b.id)) return false;
+  if (running.has(laneOf(b.id)) || waiting.some((t) => t.lane === laneOf(b.id))) return false;
   if (!opts.now && !state.settings.proactive) return false;
   const day = new Date().toLocaleDateString("en-CA", { timeZone: config.timezone });
   if (!opts.now && state.settings.proactiveMode === "morning" && state.lastProactiveDay === day) return false; // once a day, the first slot

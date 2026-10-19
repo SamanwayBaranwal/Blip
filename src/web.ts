@@ -12,7 +12,7 @@ import {
 import { answerCard, pendingCards } from "./cards.js";
 import { config, setAnthropicKey } from "./config.js";
 import {
-  createBotFromTemplate, freshChat, runSkillPrompt, giveFeedback, handleUserMessage, runProactive, runningIn, runtime, setupRoutineTemplate, stopCurrent, testRoutine, type Attachment,
+  createBotFromTemplate, customTemplates, deleteTemplate, duplicateBot, freshChat, runSkillPrompt, saveAsTemplate, todaySummary, giveFeedback, handleUserMessage, runProactive, runtime, stopBot, setupRoutineTemplate, stopCurrent, testRoutine, type Attachment,
 } from "./core.js";
 import { deleteThread, events, getThread, stateChanged, type Msg } from "./hub.js";
 import * as mac from "./mac.js";
@@ -30,8 +30,9 @@ const inputError = (error: unknown) =>
     ? "macOS blocked control. On the Blip Mac: System Settings → Privacy & Security → Accessibility → turn on node, then ./blip.sh restart"
     : (error as Error).message;
 import { addSubscription, pushPublicKey } from "./notify.js";
+import { cloudflaredPath, newLoginLink, qrSvg, reachStatus, sendLinkEmail, setReach, tailscalePath, useLoginLink } from "./reach.js";
 import { addRule, describeRule, inside, isSensitive } from "./permissions.js";
-import { describeSchedule, describeTrigger, fireWebhook, nextRun, removeRoutine } from "./routines.js";
+import { describeSchedule, describeTrigger, fireWebhook, nextRun, removeRoutine, restoreRoutine } from "./routines.js";
 import { recentAudit, save, spendByBotToday, spentLastDays, spentToday, state } from "./store.js";
 import { saveToInbox } from "./telegram.js";
 import { BOT_TEMPLATES, ROUTINE_TEMPLATES } from "./templates.js";
@@ -122,8 +123,10 @@ function appState() {
     bots: state.bots.map((b) => ({
       id: b.id, name: b.name, emoji: b.emoji, job: b.job, style: b.style, quiet: !!b.quiet, look: b.look ?? {}, spice: b.spice ?? "medium", ownBrowser: !!b.ownBrowser, helper: !!b.helper,
       model: b.model ?? "auto", contextTokens: b.contextTokens ?? 0, spentToday: byBot[b.name] ?? 0,
-      running: rt.running.some((r) => r.botId === b.id), step: rt.running.find((r) => r.botId === b.id)?.step ?? null,
-      waiting: pendingCards(b.id), queued: rt.queued.filter((q) => q.botId === b.id).length,
+      // Its own chat's task; work it's doing in groups is separate (`elsewhere`), and doesn't block this chat.
+      running: rt.running.some((r) => r.botId === b.id && r.threadId === b.id), step: rt.running.find((r) => r.botId === b.id && r.threadId === b.id)?.step ?? null,
+      elsewhere: rt.running.filter((r) => r.botId === b.id && r.threadId !== b.id).map((r) => r.threadId),
+      waiting: pendingCards(b.id), queued: rt.queued.filter((q) => q.botId === b.id && q.threadId === b.id).length,
     })),
     activeBotId: activeBot().id,
     primaryBotId: primaryBot().id,
@@ -137,11 +140,13 @@ function appState() {
     pushKey: pushPublicKey,
     authMode: config.anthropicKey ? "api" : "plan",
     teach: teachStatus(),
+    anywhere: { status: reachStatus().status, url: reachStatus().url ?? null, permanent: reachStatus().permanent },
+    setupDone: !!state.setupDone,
     lastCheckIn: state.lastProactiveAt ?? null,
     nextRoutine: nextRoutine(),
     groups: state.groups.map((g) => ({
       ...g,
-      running: rt.running.some((r) => g.members.includes(r.botId) && runningIn(r.botId) === g.id),
+      running: rt.running.some((r) => r.threadId === g.id),
       waiting: pendingCards(g.id),
     })),
   };
@@ -221,7 +226,7 @@ export function startWeb() {
     res.type("text/javascript").sendFile(path.join(config.webDir, "..", rel), { dotfiles: "allow" });
   });
   app.get("/login", (req, res) => {
-    if (matches(req.query.code)) {
+    if (matches(req.query.code) || useLoginLink(req.query.t)) {
       setSession(req, res);
       return void res.redirect("/");
     }
@@ -264,6 +269,43 @@ export function startWeb() {
   });
 
   api.get("/state", (_req, res) => void res.json(appState()));
+
+  // ---- use Blip anywhere: the public link, the owner's email, the QR code to scan
+  const reachView = () => ({ ...reachStatus(), tools: { cloudflare: !!cloudflaredPath(), tailscale: !!tailscalePath() }, agentEmail: state.email?.address ?? null, setupDone: !!state.setupDone });
+  api.get("/reach", (_req, res) => void res.json(reachView()));
+  api.post("/reach", async (req, res) => {
+    const mode = str(req.body.mode);
+    if (!["off", "cloudflare", "tailscale"].includes(mode)) return void res.status(400).json({ error: "bad mode" });
+    await setReach(mode as "off");
+    res.json(reachView());
+  });
+  api.post("/reach/owner", (req, res) => {
+    const email = str(req.body.email, 200).trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return void res.status(400).json({ error: "That isn't an email address." });
+    state.owner = { ...state.owner, email };
+    save();
+    res.json(reachView());
+  });
+  api.post("/reach/email", async (_req, res) => {
+    try {
+      await sendLinkEmail("setup");
+      res.json(reachView());
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  });
+  api.post("/reach/done", (_req, res) => {
+    state.setupDone = true;
+    save();
+    stateChanged();
+    res.json(reachView());
+  });
+  // A QR code with a 15-minute, one-time sign-in link: point the phone's camera at the Mac's screen.
+  api.get("/reach/qr", (_req, res) => {
+    const r = reachStatus();
+    if (r.status !== "on" || !r.url) return void res.status(409).json({ error: "Turn on “Use Blip anywhere” first." });
+    res.set({ "Content-Type": "image/svg+xml", "Cache-Control": "no-store" }).send(qrSvg(newLoginLink(r.url, 15 * 60_000)));
+  });
 
   // ---- health: report, Recover, Reset, backups, self-test
   api.get("/health", async (_req, res) => void res.json(await health()));
@@ -445,6 +487,20 @@ export function startWeb() {
       res.status(400).json({ error: (error as Error).message });
     }
   });
+  api.post("/bots/:id/duplicate", (req, res) => {
+    const b = botOr404(req, res);
+    if (!b) return;
+    try {
+      res.json({ id: duplicateBot(b).id });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  });
+  api.post("/bots/:id/template", (req, res) => {
+    const b = botOr404(req, res);
+    if (b) res.json({ key: saveAsTemplate(b) });
+  });
+  api.get("/today", (_req, res) => void res.json(todaySummary()));
   api.patch("/bots/:id", (req, res) => {
     const b = botOr404(req, res);
     if (!b) return;
@@ -483,7 +539,7 @@ export function startWeb() {
     if (!b) return;
     try {
       deleteBot(b);
-      stopCurrent(b.id);
+      stopBot(b.id); // in every chat, not just its own
       // Out of its groups too; a group left with fewer than 2 bots is removed.
       for (const g of state.groups) g.members = g.members.filter((id) => id !== b.id);
       for (const g of state.groups.filter((x) => x.members.length < 2)) deleteThread(g.id);
@@ -527,11 +583,36 @@ export function startWeb() {
   );
   api.post("/routines/:id/run", (req, res) => void res.json({ ok: testRoutine(String(req.params.id)) }));
   api.delete("/routines/:id", (req, res) => {
+    const routine = state.routines.find((r) => r.id === req.params.id);
     const ok = removeRoutine(String(req.params.id));
     stateChanged();
-    res.json({ ok });
+    res.json({ ok, routine }); // the app keeps it for Undo
   });
-  api.get("/templates", (_req, res) => void res.json({ routines: ROUTINE_TEMPLATES, bots: BOT_TEMPLATES }));
+  api.post("/routines/restore", (req, res) => {
+    const r = req.body.routine as Record<string, unknown> | undefined;
+    if (!r || typeof r.id !== "string" || !/^[\w-]{1,40}$/.test(r.id) || typeof r.botId !== "string" || typeof r.prompt !== "string" || typeof r.schedule !== "string") return void res.status(400).json({ error: "That routine can't be restored." });
+    try {
+      const trigger = r.trigger as Record<string, unknown> | undefined;
+      const clean = {
+        id: r.id, botId: r.botId, name: str(r.name, 120), schedule: str(r.schedule, 120), prompt: str(r.prompt, 20_000), createdAt: str(r.createdAt, 40) || new Date().toISOString(),
+        ...(trigger ? { trigger: JSON.parse(JSON.stringify(trigger)) } : {}),
+      };
+      restoreRoutine(clean as Parameters<typeof restoreRoutine>[0]);
+      stateChanged();
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  });
+  api.get("/templates", (_req, res) => void res.json({ routines: ROUTINE_TEMPLATES, bots: BOT_TEMPLATES, custom: customTemplates() }));
+  api.delete("/templates/:key", (req, res) => {
+    try {
+      deleteTemplate(String(req.params.key));
+      res.json({ ok: true });
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  });
   api.post("/templates/routine", (req, res) => void res.json({ ok: setupRoutineTemplate(str(req.body.key), str(req.body.botId) || undefined) }));
   api.get("/skills", (_req, res) => void res.json(skills.skillsOverview(listSkills())));
   // Skills are plain Markdown the user can read, edit, version, export and import.
@@ -598,7 +679,20 @@ export function startWeb() {
     if (!/^[\w-][\w.-]*$/.test(name)) return void res.status(400).json({ error: "bad skill name" });
     const dir = path.join(config.skillsDir, name);
     if (!inside(dir, config.skillsDir) || dir === config.skillsDir) return void res.status(400).json({ error: "bad skill name" });
-    fs.rmSync(dir, { recursive: true, force: true });
+    // Kept aside for a minute-long Undo (and a day after that), not deleted outright.
+    const trash = path.join(config.dataDir, "skill-trash", `${name}-${Date.now()}`);
+    fs.mkdirSync(path.dirname(trash), { recursive: true });
+    fs.renameSync(dir, trash);
+    res.json({ ok: true, undo: path.basename(trash) });
+  });
+  api.post("/skills/:name/undelete", (req, res) => {
+    const name = String(req.params.name);
+    const id = str(req.body.undo, 200);
+    if (!/^[\w-][\w.-]*$/.test(name) || !/^[\w.-]+$/.test(id) || !id.startsWith(`${name}-`)) return void res.status(400).json({ error: "Nothing to undo." });
+    const from = path.join(config.dataDir, "skill-trash", id);
+    const to = path.join(config.skillsDir, name);
+    if (!fs.existsSync(from) || fs.existsSync(to)) return void res.status(409).json({ error: "That can't be undone any more." });
+    fs.renameSync(from, to);
     res.json({ ok: true });
   });
 

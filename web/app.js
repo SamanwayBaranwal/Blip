@@ -49,7 +49,7 @@ function nativeBadge(count) {
 // ============================================================ store
 const store = { state: null, threads: {}, unread: {}, toast: null, speaking: false, listeners: new Set() };
 // Set by Shell, so anything (a result chip, a "/" command, an empty-state tile) can open a sheet or a chat.
-const ui = { openSheet: () => {}, select: () => {}, setControl: () => {} };
+const ui = { openSheet: () => {}, select: () => {}, setControl: () => {}, openImage: () => {}, openPalette: () => {} };
 const emit = () => store.listeners.forEach((l) => l());
 function useStore() {
   const [, force] = useState(0);
@@ -66,15 +66,29 @@ function setThemeColor(t) {
   document.querySelector('meta[name="theme-color"]')?.setAttribute("content", light ? "#ffffff" : "#000000");
 }
 let toastTimer;
-function toast(text) {
-  store.toast = text;
+/** A short message at the bottom. With `action` ({ label, run }) it offers one button (Undo) and stays longer. */
+function toast(text, action) {
+  store.toast = { text, action, id: Date.now() + Math.random() };
   emit();
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => {
-    store.toast = null;
-    emit();
-  }, 2600);
+  toastTimer = setTimeout(hideToast, action ? 6000 : 2600);
 }
+function hideToast() {
+  if (!store.toast) return;
+  store.toast = { ...store.toast, leaving: true };
+  emit();
+  setTimeout(() => {
+    if (store.toast?.leaving) (store.toast = null), emit();
+  }, 200);
+}
+function Toast({ t }) {
+  if (!t) return null;
+  return html`<div key=${t.id} class=${`toast ${t.leaving ? "leaving" : ""}`} role="status">
+    <span>${t.text}</span>
+    ${t.action ? html`<button class="toast-act" onClick=${() => { hideToast(); Promise.resolve(t.action.run()).catch(fail); }}>${t.action.label}</button>` : null}
+  </div>`;
+}
+const buzz = (ms = 8) => { try { navigator.vibrate?.(ms); } catch {} }; // Android only; iPhone ignores it
 const fail = (e) => toast(e?.message || String(e));
 
 async function loadState() {
@@ -327,7 +341,13 @@ const I = {
   repeat: () => svg(html`<path d="M4 11V9a3 3 0 0 1 3-3h12M16 3l3 3-3 3M20 13v2a3 3 0 0 1-3 3H5M8 21l-3-3 3-3" />`),
   slash: () => svg(html`<path d="M15 4 9 20" />`),
   shield: () => svg(html`<path d="M12 3 5 6v6c0 4.2 3 7.6 7 9 4-1.4 7-4.8 7-9V6z" />`),
+  search: () => svg(html`<circle cx="11" cy="11" r="6.5" /><path d="m20 20-4.2-4.2" />`),
+  grid: () => svg(html`<rect x="4" y="4" width="6.5" height="6.5" rx="1.6" /><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.6" /><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.6" /><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.6" />`),
+  copy: () => svg(html`<rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />`),
+  users: () => svg(html`<circle cx="9" cy="9" r="3.2" /><path d="M3.5 19a5.5 5.5 0 0 1 11 0M16 6.5a3 3 0 0 1 0 5.6M18 19a5 5 0 0 0-2.4-4.3" />`),
+  left: () => svg(html`<path d="M15 6l-6 6 6 6" />`),
 };
+const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 // Blip, the mascot: a mouse pointer that came alive. Its state (idle, working, needs, done, sleep) is CSS-driven.
 // Every bot can dress its Blip differently: body color, hat, eyewear, facial hair, neckwear and something to hold.
 const OUT = 'stroke="#56565e" stroke-width="2"';
@@ -439,21 +459,55 @@ if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
   }, 4600);
 }
 
+// The big Blip on an empty chat watches your pointer (or finger). One listener, throttled to the frame rate.
+if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  let pending = false, lx = 0, ly = 0;
+  const look = (x, y) => {
+    lx = x; ly = y;
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      const el = document.querySelector(".hello .m");
+      if (!el) return;
+      const r = el.getBoundingClientRect();
+      const dx = lx - (r.left + r.width / 2), dy = ly - (r.top + r.height / 2);
+      const d = Math.hypot(dx, dy) || 1, k = Math.min(1, d / 260);
+      el.style.setProperty("--lx", `${((dx / d) * 4 * k).toFixed(2)}px`);
+      el.style.setProperty("--ly", `${((dy / d) * 3 * k).toFixed(2)}px`);
+    });
+  };
+  addEventListener("pointermove", (e) => look(e.clientX, e.clientY), { passive: true });
+  addEventListener("pointerdown", (e) => look(e.clientX, e.clientY), { passive: true });
+}
+
 // ============================================================ small components
 /** A group chat, shown like a bot: its members' avatars overlapping, the lead in front. */
 function groupAsBot(g, st) {
   const members = g.members.map((id) => st.bots.find((b) => b.id === id)).filter(Boolean);
   const lead = members.find((b) => b.id === g.leadId) || members[0];
-  return { id: g.id, name: g.name, group: g, members, lead, look: lead?.look, job: members.map((m) => m.name).join(", "), running: g.running, waiting: g.waiting, step: g.running ? "Working…" : null, model: lead?.model || "auto" };
+  // Who's working in this group right now (each bot's task here is separate from its own chat).
+  const workers = (st.runtime?.running || []).filter((r) => r.threadId === g.id).map((r) => r.botId);
+  const names = workers.map((id) => members.find((m) => m.id === id)?.name).filter(Boolean);
+  const step = !g.running ? null : names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)} working` : names.length ? `${names[0]} working` : "Working…";
+  return { id: g.id, name: g.name, group: g, members, lead, workers, look: lead?.look, job: members.map((m) => m.name).join(", "), running: g.running, waiting: g.waiting, step, model: lead?.model || "auto" };
 }
 const botById = (id) => store.state?.bots.find((b) => b.id === id);
+/** A bot's own color (its Blip's body color), used for small identity accents. White for the classic Blip. */
+const botColor = (b) => LOOKS.color.find((c) => c.id === b?.look?.color)?.body || "var(--text)";
 
 function Avatar({ bot, size = 34, status, still }) {
+  // A group is a crew: up to three of its Blips side by side (the lead in front), each in its own color, on a
+  // rounded square so it never looks like a single bot. While the group works, they bob one after another.
   if (bot?.group) {
-    const [a, b] = [bot.lead, bot.members.find((m) => m.id !== bot.lead?.id)];
-    return html`<div class="avatar group-avatar" title=${bot.name} style=${`width:${size}px;height:${size}px`}>
-      ${b ? html`<span class="ga back"><${Blip} still tight look=${b.look} /></span>` : null}
-      <span class="ga front"><${Blip} still=${still} tight look=${a?.look} state=${status === "live" ? "working" : status === "wait" ? "needs" : "idle"} /></span>
+    const others = bot.members.filter((m) => m.id !== bot.lead?.id);
+    const crew = [others[0], bot.lead, others[1]].filter(Boolean);
+    const extra = bot.members.length - crew.length;
+    const busy = new Set(bot.workers || []);
+    return html`<div class=${`avatar crew n${crew.length} ${status === "live" ? "live" : ""}`} title=${bot.name} style=${`width:${size}px;height:${size}px;--s:${size}px`}>
+      ${crew.map((m, i) => html`<span key=${m.id} class=${`crew-m ${m.id === bot.lead?.id ? "lead" : ""} ${busy.has(m.id) ? "busy" : ""}`} style=${`--i:${i}`}>
+        <${Blip} still=${still || !busy.has(m.id)} tight look=${m.look} state=${busy.has(m.id) ? "working" : status === "wait" && m.id === bot.lead?.id ? "needs" : "idle"} /></span>`)}
+      ${extra > 0 && size >= 30 ? html`<span class="crew-more">+${extra}</span>` : null}
       ${status ? html`<span class=${`dot ${status}`} />` : null}
     </div>`;
   }
@@ -469,14 +523,23 @@ function Seg({ value, options, onChange }) {
 function Sheet({ title, onClose, children, actions }) {
   const close = useRef(onClose);
   close.current = onClose;
+  const [leaving, setLeaving] = useState(false);
+  // Closing slides the sheet away first, then removes it.
+  const leave = () => {
+    if (leaving) return;
+    setLeaving(true);
+    setTimeout(() => close.current(), 190);
+  };
+  const leaveRef = useRef(leave);
+  leaveRef.current = leave;
   useEffect(() => {
-    const onKey = (e) => e.key === "Escape" && close.current();
+    const onKey = (e) => e.key === "Escape" && leaveRef.current();
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, []);
-  return html`<div class="overlay" onClick=${(e) => e.target === e.currentTarget && onClose()}>
+  return html`<div class=${`overlay ${leaving ? "leaving" : ""}`} onClick=${(e) => e.target === e.currentTarget && leave()}>
     <div class="sheet" role="dialog" aria-label=${title}>
-      <div class="sheet-head"><h2>${title}</h2>${actions}<button class="icon-btn" onClick=${onClose} aria-label="Close"><${I.close} /></button></div>
+      <div class="sheet-head"><h2>${title}</h2>${actions}<button class="icon-btn" onClick=${leave} aria-label="Close"><${I.close} /></button></div>
       <div class="sheet-body">${children}</div>
     </div>
   </div>`;
@@ -503,6 +566,8 @@ function botStatus(bot, st) {
   const rt = st.runtime;
   if (bot.running) return bot.waiting ? { cls: "wait", dot: "wait", text: "Waiting for you" } : { cls: "live", dot: "live", text: bot.step || "Working…" };
   if (bot.queued) return { cls: "", dot: "", text: `${bot.queued} queued` };
+  // Working in a group (that doesn't block its own chat): say where.
+  if (bot.elsewhere?.length) return { cls: "live", dot: "live", text: `Working in ${(st.groups || []).find((g) => g.id === bot.elsewhere[0])?.name || "another chat"}` };
   return { cls: "", dot: null, text: bot.job };
 }
 
@@ -573,6 +638,8 @@ function Sidebar({ st, open, onSelect, onSheet, onClose }) {
       </div>
       <div>
         <div class="side-label">Workspace</div>
+        <button class="nav-row" onClick=${() => (onClose(), ui.openPalette())}><${I.search} /> Search<span class="kbd">${isMac ? "⌘K" : "Ctrl K"}</span></button>
+        <button class="nav-row" onClick=${() => onSheet({ type: "control" })}><${I.grid} /> Control center${st.runtime.pendingCards ? html`<span class="badge" style="margin-left:auto">${st.runtime.pendingCards}</span>` : null}</button>
         <button class="nav-row" onClick=${() => onSheet({ type: "routines" })}><${I.clock} /> Routines</button>
         <button class="nav-row" onClick=${() => onSheet({ type: "skills" })}><${I.book} /> Skills</button>
         <button class="nav-row" onClick=${() => onSheet({ type: "activity" })}><${I.pulse} /> Activity</button>
@@ -626,7 +693,7 @@ function TextMsg({ m, bot, onImage }) {
   return html`<div class=${`msg ${user ? "user" : "bot"}`}>
     ${user ? null : html`<${Avatar} bot=${speaker} size=${28} still />`}
     <div class="body">
-      ${named ? html`<div class="speaker">${speaker?.name}</div>` : null}
+      ${named ? html`<div class="speaker" style=${`--bot:${botColor(speaker)}`}><i />${speaker?.name}</div>` : null}
       ${m.meta?.header ? html`<div class="header-line">${m.meta.header}</div>` : null}
       ${m.text?.trim() ? html`<div class=${`text ${m.meta?.error ? "error" : ""}`} dangerouslySetInnerHTML=${{ __html: md(m.text) }} />` : null}
       <${Files} files=${m.files} onImage=${onImage} />
@@ -647,6 +714,19 @@ function RunBlock({ m, bot: chatBot }) {
   const isOpen = open ?? live;
   const now = useNow(live);
   const elapsed = (r.endedAt || now) - r.startedAt;
+  // The moment a task finishes well, its Blip celebrates for a couple of seconds.
+  const prevStatus = useRef(r.status);
+  const [celebrate, setCelebrate] = useState(false);
+  useEffect(() => {
+    const was = prevStatus.current;
+    prevStatus.current = r.status;
+    if ((was === "running" || was === "waiting") && r.status === "done") {
+      setCelebrate(true);
+      buzz(12);
+      const t = setTimeout(() => setCelebrate(false), 2600);
+      return () => clearTimeout(t);
+    }
+  }, [r.status]);
   const last = r.steps.at(-1)?.text;
   const stateIcon = { done: I.okCircle, failed: I.xCircle, stopped: I.dash, "nothing new": I.dash, waiting: I.pauseCircle }[r.status];
   const title = r.status === "waiting" ? "Waiting for you" : live ? (r.stalled ? "Still working" : "Working") : r.status === "failed" ? "Failed" : r.status === "stopped" ? "Stopped" : r.status === "nothing new" ? "Nothing new" : `Worked for ${dur(elapsed)}`;
@@ -661,12 +741,13 @@ function RunBlock({ m, bot: chatBot }) {
     : null;
   return html`<div class=${`run ${live ? "live" : ""} ${r.status === "waiting" ? "waiting" : ""}`}>
     <button class="run-head" onClick=${() => setOpen(!isOpen)}>
-      ${live ? html`<${Blip} size=${32} look=${bot?.look} state=${r.status === "waiting" ? "needs" : "working"} />` : html`<span class="state-dot" style=${r.status === "failed" ? "color:var(--danger)" : ""}><${stateIcon || I.okCircle} /></span>`}
-      <span class="label"><b class=${live && r.status !== "waiting" ? "shimmer" : ""}>${r.bot || chatBot.group ? `${bot?.name} · ` : ""}${title}</b><span>${sub}</span></span>
+      ${live || celebrate ? html`<${Blip} size=${32} look=${bot?.look} state=${celebrate ? "done" : r.status === "waiting" ? "needs" : "working"} />` : html`<span class="state-dot" style=${r.status === "failed" ? "color:var(--danger)" : ""}><${stateIcon || I.okCircle} /></span>`}
+      <span class="label"><b class=${live && r.status !== "waiting" ? "shimmer" : ""}>${r.bot || chatBot.group ? html`<i class="who-dot" style=${`--bot:${botColor(bot)}`} />${bot?.name} · ` : ""}${title}</b><span>${sub}</span></span>
       ${live ? html`<span class="time">${r.model ? `${r.model} · ` : ""}${dur(elapsed)}</span>` : null}
       <span class=${`chev ${isOpen ? "open" : ""}`}><${I.chevron} /></span>
     </button>
-    ${r.results?.length ? html`<div class="results">${r.results.map((x, i) => html`<${ResultChip} key=${i} x=${x} />`)}</div>` : null}
+    ${r.results?.length ? html`<div class="results">${r.results.map((x, i) => html`<${ResultChip} key=${i} x=${x} i=${i} />`)}</div>` : null}
+    ${r.shots?.length ? html`<${Proof} shots=${r.shots} live=${live} />` : null}
     ${r.replay && !live
       ? html`<button class="replay-link" onClick=${() => setOpen(true)}><${I.play} /> Watch replay${isOpen ? "" : " · what it did in the browser"}</button>`
       : null}
@@ -687,13 +768,53 @@ function RunBlock({ m, bot: chatBot }) {
 
 /** Something a task made, right on the task: tap a file to open it, a skill to read it, a routine to see it. */
 const RESULT_ICON = { file: I.files, event: I.calendar, reminder: I.bell, skill: I.book, routine: I.repeat };
-function ResultChip({ x }) {
+/** Proof of work: what the screen looked like as the bot worked. Up to 3 thumbnails; tap for the full gallery. */
+function Proof({ shots, live }) {
+  const pick = shots.length <= 3 ? shots.map((_, i) => i) : [0, Math.floor((shots.length - 1) / 2), shots.length - 1];
+  const urls = shots.map((p) => fileUrl(p));
+  return html`<div class="proof">
+    <div class="proof-label">${live ? "Live view" : "What it did"}</div>
+    <div class="proof-row">${pick.map((i, k) => html`<button key=${shots[i]} class="proof-shot" style=${`--k:${k}`} onClick=${() => ui.openImage(urls, i)} aria-label=${`Screenshot ${i + 1} of ${shots.length}`}>
+      <img src=${urls[i]} alt="" loading="lazy" />
+      ${k === pick.length - 1 && shots.length > 3 ? html`<span class="proof-more">+${shots.length - 3}</span>` : null}
+    </button>`)}</div>
+  </div>`;
+}
+
+/** Full-screen images: swipe or use the arrows; tap outside or Esc to close. */
+function Lightbox({ box, onClose }) {
+  const list = typeof box === "string" ? [box] : box.list;
+  const [i, setI] = useState(typeof box === "string" ? 0 : box.i);
+  const go = (d) => setI((x) => (x + d + list.length) % list.length);
+  const touch = useRef(0);
+  useEffect(() => {
+    const onKey = (e) => (e.key === "Escape" ? onClose() : e.key === "ArrowRight" ? go(1) : e.key === "ArrowLeft" ? go(-1) : null);
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [list.length]);
+  return html`<div class="lightbox" onClick=${(e) => e.target === e.currentTarget && onClose()}
+    onTouchStart=${(e) => (touch.current = e.touches[0].clientX)}
+    onTouchEnd=${(e) => { const dx = e.changedTouches[0].clientX - touch.current; if (Math.abs(dx) > 50 && list.length > 1) go(dx < 0 ? 1 : -1); }}>
+    <img key=${list[i]} src=${list[i]} alt="" onClick=${() => list.length === 1 && onClose()} />
+    ${list.length > 1
+      ? html`<button class="lb-nav prev" onClick=${() => go(-1)} aria-label="Previous"><${I.left} /></button>
+        <button class="lb-nav next" onClick=${() => go(1)} aria-label="Next"><${I.chevron} /></button>
+        <div class="lb-count">${i + 1} / ${list.length}</div>`
+      : null}
+    <button class="lb-close" onClick=${onClose} aria-label="Close"><${I.close} /></button>
+  </div>`;
+}
+
+function ResultChip({ x, i = 0 }) {
   const Icon = RESULT_ICON[x.kind] || I.okCircle;
   const inner = html`<span class="r-icon"><${Icon} /></span><span class="r-text"><b>${x.title}</b><span>${[RESULT_WORD[x.kind], x.sub].filter(Boolean).join(" · ")}</span></span>`;
-  if (x.kind === "file" && x.path) return html`<a class="result" href=${fileUrl(x.path)} target="_blank" rel="noopener">${inner}</a>`;
-  if (x.kind === "skill") return html`<button class="result" onClick=${() => ui.openSheet({ type: "skills", open: x.title })}>${inner}</button>`;
-  if (x.kind === "routine") return html`<button class="result" onClick=${() => ui.openSheet({ type: "routines" })}>${inner}</button>`;
-  return html`<div class="result">${inner}</div>`;
+  const style = `--k:${i}`;
+  if (x.kind === "file" && x.path) return isImage(x.path)
+    ? html`<button class="result" style=${style} onClick=${() => ui.openImage([fileUrl(x.path)])}>${inner}</button>`
+    : html`<a class="result" style=${style} href=${fileUrl(x.path)} target="_blank" rel="noopener">${inner}</a>`;
+  if (x.kind === "skill") return html`<button class="result" style=${style} onClick=${() => ui.openSheet({ type: "skills", open: x.title })}>${inner}</button>`;
+  if (x.kind === "routine") return html`<button class="result" style=${style} onClick=${() => ui.openSheet({ type: "routines" })}>${inner}</button>`;
+  return html`<div class="result" style=${style}>${inner}</div>`;
 }
 
 const KICKER = { approval: "Needs your approval", draft: "Draft · review before it's sent", takeover: "Your turn", suggestion: "Suggestion", secret: "Secret · saved to the Keychain", check: "Double-check failed" };
@@ -781,6 +902,13 @@ function Card({ m, onTakeover }) {
 
 function MessageList({ bot, messages, onImage, onTakeover }) {
   const ref = useRef();
+  // Messages that arrive while you watch slide in; the history already there when a chat opens doesn't.
+  const known = useRef({ bot: null, ids: null });
+  if (known.current.bot !== bot.id || (!known.current.ids && messages)) known.current = { bot: bot.id, ids: messages ? new Set(messages.map((m) => m.id)) : null };
+  const fresh = (m) => known.current.ids && !known.current.ids.has(m.id);
+  useEffect(() => {
+    if (known.current.ids && messages) for (const m of messages) known.current.ids.add(m.id);
+  });
   const stick = useRef(true);
   useLayoutEffect(() => {
     const el = ref.current;
@@ -796,13 +924,13 @@ function MessageList({ bot, messages, onImage, onTakeover }) {
     stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
   };
   return html`<div class="messages" ref=${ref} onScroll=${onScroll}>
-    <div class="messages-inner">
+    <div class="messages-inner" key=${bot.id}>
       ${messages === undefined ? html`<div class="empty">Loading…</div>` : null}
-      ${messages?.length === 0 ? html`<div class="hello" style="min-height:50vh"><${Blip} size=${104} look=${bot.look} /><h1>${bot.name}</h1><p>${bot.job}</p></div>` : null}
-      ${(messages || []).filter((m) => !inTray(m)).map((m) =>
-        m.kind === "run" ? html`<${RunBlock} key=${m.id} m=${m} bot=${bot} />`
-        : m.kind === "card" ? html`<${Card} key=${m.id} m=${m} onTakeover=${onTakeover} />`
-        : html`<${TextMsg} key=${m.id} m=${m} bot=${bot} onImage=${onImage} />`,
+      ${messages?.length === 0 ? html`<div class="hello" style="min-height:50vh">${bot.group ? html`<${Avatar} bot=${bot} size=${112} />` : html`<${Blip} size=${104} look=${bot.look} />`}<h1>${bot.name}</h1><p>${bot.group ? `${bot.job}. ${bot.lead?.name} leads; @Name asks one bot.` : bot.job}</p></div>` : null}
+      ${(messages || []).filter((m) => !inTray(m)).map((m) => html`<div key=${m.id} class=${`m-wrap ${fresh(m) ? `enter ${m.role === "user" ? "from-me" : ""}` : ""}`}>${
+        m.kind === "run" ? html`<${RunBlock} m=${m} bot=${bot} />`
+        : m.kind === "card" ? html`<${Card} m=${m} onTakeover=${onTakeover} />`
+        : html`<${TextMsg} m=${m} bot=${bot} onImage=${onImage} />`}</div>`,
       )}
     </div>
   </div>`;
@@ -1009,6 +1137,21 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
       );
     }
   };
+  // "@": suggest the bots you can address (a group's members, or your other bots), as you type.
+  const [caret, setCaret] = useState(0);
+  const atQuery = /(^|\s)@([^\s@]*)$/.exec(text.slice(0, caret))?.[2];
+  const mentionPool = bot.group ? bot.members : (st.bots || []).filter((b) => b.id !== bot.id);
+  const mentionItems = atQuery === undefined ? [] : mentionPool
+    .filter((b) => b.name.toLowerCase().startsWith(atQuery.toLowerCase()) || b.name.toLowerCase().replace(/\s+/g, "").startsWith(atQuery.toLowerCase()))
+    .slice(0, 6)
+    .map((b) => ({ cmd: b.name, label: b.id === bot.lead?.id ? `Leads this group · ${b.job}` : b.job, kind: "mention", bot: b }));
+  const insertMention = (name) => {
+    const before = text.slice(0, caret).replace(/@([^\s@]*)$/, `@${name} `);
+    const next = before + text.slice(caret);
+    setText(next);
+    setCaret(before.length);
+    setTimeout(() => { ta.current?.focus(); ta.current?.setSelectionRange(before.length, before.length); }, 0);
+  };
   // The "/" menu: commands and saved skills. "/name details" runs a skill; commands act right away.
   const slashQuery = /^\/([\w.-]*)$/.exec(text)?.[1]?.toLowerCase();
   const [skillList, setSkillList] = useState(null);
@@ -1017,7 +1160,7 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
   useEffect(() => {
     if (slashQuery !== undefined) api("/skills").then(setSkillList).catch(() => setSkillList([]));
   }, [slashQuery !== undefined]);
-  useEffect(() => (setMenuIndex(0), setMenuClosed(false)), [slashQuery]);
+  useEffect(() => (setMenuIndex(0), setMenuClosed(false)), [slashQuery, atQuery]);
   const commands = [
     { cmd: "new", label: "Start a new chat (memory is kept)", run: () => api(bot.group ? `/groups/${bot.id}/fresh` : `/bots/${bot.id}/fresh`, { method: "POST" }).then(() => loadThread(bot.id)).then(() => toast("New chat")) },
     ...(running ? [{ cmd: "stop", label: "Stop the task in progress", run: () => api("/stop", { method: "POST", body: { botId: bot.id } }) }] : []),
@@ -1028,11 +1171,12 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
     { cmd: "routines", label: "Scheduled and event routines", run: () => ui.openSheet({ type: "routines" }) },
     { cmd: "checkin", label: "Look around now for anything slipping", run: () => api("/proactive/run", { method: "POST" }).then((r) => toast(r.started ? "Checking in. Anything useful shows up as a suggestion." : "A check-in is already running")) },
   ];
-  const menu = slashQuery === undefined || menuClosed ? [] : [
+  const menu = menuClosed ? [] : slashQuery !== undefined ? [
     ...commands.map((c) => ({ ...c, kind: "command" })),
     ...(skillList || []).map((sk) => ({ cmd: sk.name, label: sk.description, kind: "skill" })),
-  ].filter((i) => i.cmd.toLowerCase().startsWith(slashQuery)).slice(0, 8);
+  ].filter((i) => i.cmd.toLowerCase().startsWith(slashQuery)).slice(0, 8) : mentionItems;
   const choose = (item) => {
+    if (item.kind === "mention") return insertMention(item.cmd);
     if (item.kind === "skill") {
       setText(`/${item.cmd} `);
       setTimeout(() => ta.current?.focus(), 0);
@@ -1063,7 +1207,9 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
     ${talk ? html`<${TalkOrb} phase=${talkState || "Starting…"} stream=${talkStream} onEnd=${() => setTalk(false)} />` : null}
     ${menu.length
       ? html`<div class="slash-menu" role="listbox">${menu.map((item, i) => html`<button role="option" aria-selected=${i === menuIndex} class=${`slash-item ${i === menuIndex ? "on" : ""}`} onPointerDown=${(e) => e.preventDefault()} onClick=${() => choose(item)} onMouseEnter=${() => setMenuIndex(i)}>
-          <span class="slash-cmd">/${item.cmd}</span><span class="slash-label">${item.label}</span>${item.kind === "skill" ? html`<span class="slash-kind">Skill</span>` : null}
+          ${item.kind === "mention"
+            ? html`<${Avatar} bot=${item.bot} size=${24} still /><span class="slash-cmd">@${item.cmd}</span><span class="slash-label">${item.label}</span>`
+            : html`<span class="slash-cmd">/${item.cmd}</span><span class="slash-label">${item.label}</span>${item.kind === "skill" ? html`<span class="slash-kind">Skill</span>` : null}`}
         </button>`)}</div>`
       : null}
     <div class="composer">
@@ -1071,7 +1217,7 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
         ? html`<div class="attach-list">${files.map((f, i) => html`<span class="chip">${f.preview ? html`<img src=${f.preview} style="width:20px;height:20px;border-radius:4px;object-fit:cover" />` : html`<${I.clip} />`} ${f.name.slice(0, 24)}
             <button onClick=${() => { if (f.preview) URL.revokeObjectURL(f.preview); setFiles(files.filter((_, j) => j !== i)); }} aria-label="Remove">×</button></span>`)}</div>`
         : null}
-      <textarea ref=${ta} rows="1" placeholder=${bot.group ? (running ? "Steer the team while it works…" : `Message ${bot.name} (@Name asks one bot)`) : running ? `Steer ${bot.name} while it works…` : `What should ${bot.name} do?`} value=${text} onInput=${(e) => setText(e.target.value)} onKeyDown=${onKey} />
+      <textarea ref=${ta} rows="1" placeholder=${bot.group ? (running ? "Steer the team while it works…" : `Message ${bot.name} (@Name asks one bot)`) : running ? `Steer ${bot.name} while it works…` : `What should ${bot.name} do?`} value=${text} onInput=${(e) => { setText(e.target.value); setCaret(e.target.selectionStart); }} onKeyUp=${(e) => setCaret(e.target.selectionStart)} onClick=${(e) => setCaret(e.target.selectionStart)} onKeyDown=${onKey} />
       <div class="composer-row">
         <button class="icon-btn" onClick=${() => fileInput.current.click()} aria-label="Attach"><${I.clip} /></button>
         <input type="file" multiple hidden ref=${fileInput} onChange=${pick} />
@@ -1859,7 +2005,14 @@ function RoutinesSheet({ st, botId, onClose }) {
   const [routines, reload] = useLoad(() => api("/routines"), []);
   const [tpl] = useLoad(() => api("/templates"), []);
   const run = (r) => api(`/routines/${r.id}/run`, { method: "POST" }).then(() => toast(`Test run of "${r.name}" started`)).catch(fail);
-  const del = (r) => confirm(`Delete routine "${r.name}"?`) && api(`/routines/${r.id}`, { method: "DELETE" }).then(reload).catch(fail);
+  // Deleting is instant, with Undo for a few seconds (no "are you sure?" dialogs).
+  const del = (r) =>
+    api(`/routines/${r.id}`, { method: "DELETE" })
+      .then(({ routine }) => {
+        reload();
+        toast(`Deleted "${r.name}"`, routine && { label: "Undo", run: () => api("/routines/restore", { method: "POST", body: { routine } }).then(() => { reload(); toast("Routine is back"); }) });
+      })
+      .catch(fail);
   const setup = (key) => api("/templates/routine", { method: "POST", body: { key, botId } }).then(() => { toast("Setting it up in the chat…"); onClose(); }).catch(fail);
   return html`<${Sheet} title="Routines" onClose=${onClose}>
     ${routines === null ? html`<div class="empty">Loading…</div>`
@@ -1895,10 +2048,28 @@ function SkillsSheet({ botId, onClose, setControl, initial }) {
   const restore = (v) => api(`/skills/${editing.name}/restore`, { method: "POST", body: { version: v.id } }).then(() => api(`/skills/${editing.name}`)).then((s) => { setEditing(s); toast("Restored that version"); }).catch(fail);
   const [title, setTitle] = useState("");
   const run = (s) => api(`/skills/${s.name}/run`, { method: "POST", body: { botId } }).then(() => { toast(`Running ${s.name}`); onClose(); }).catch(fail);
-  const del = (s) => confirm(`Delete skill "${s.name}"?`) && api(`/skills/${s.name}`, { method: "DELETE" }).then(reload).catch(fail);
-  const open = (s) => api(`/skills/${s.name}`).then(setEditing).catch(fail);
+  const del = (s) =>
+    api(`/skills/${s.name}`, { method: "DELETE" })
+      .then(({ undo }) => {
+        reload();
+        toast(`Deleted ${s.name}`, undo && { label: "Undo", run: () => api(`/skills/${s.name}/undelete`, { method: "POST", body: { undo } }).then(() => { reload(); toast("Skill is back"); }) });
+      })
+      .catch(fail);
+  const open = (s) => api(`/skills/${s.name}`).then((x) => setEditing({ ...x, original: x.text })).catch(fail);
   useEffect(() => void (initial && open({ name: initial })), [initial]);
-  const saveEdit = () => api(`/skills/${editing.name}`, { method: "PUT", body: { text: editing.text } }).then(() => { toast("Skill saved"); setEditing(null); reload(); }).catch(fail);
+  const saveEdit = () => {
+    const name = editing.name;
+    const changed = editing.text !== editing.original; // an unchanged save makes no new version, so there'd be nothing to undo
+    api(`/skills/${name}`, { method: "PUT", body: { text: editing.text } })
+      .then(() => api(`/skills/${name}`))
+      .then((s) => {
+        setEditing(null);
+        reload();
+        const before = changed && s.versions?.[0]; // the version this save replaced
+        toast("Skill saved", before && { label: "Undo", run: () => api(`/skills/${name}/restore`, { method: "POST", body: { version: before.id } }).then(() => { reload(); toast("Back to the previous version"); }) });
+      })
+      .catch(fail);
+  };
   const record = (e) => {
     e.preventDefault();
     api("/teach/start", { method: "POST", body: { botId, title } })
@@ -2029,7 +2200,7 @@ function PairPhone() {
 }
 
 /** The agent's own email address: people can email Blip, and it writes back (every email is a draft you approve). */
-function AgentEmail({ st }) {
+function AgentEmail({ st, onChange, title = "Agent email" }) {
   const [data, reload] = useLoad(() => api("/email"), []);
   const [form, setForm] = useState({ address: "", password: "", imapHost: "", smtpHost: "" });
   const [known, setKnown] = useState(true);
@@ -2040,18 +2211,18 @@ function AgentEmail({ st }) {
     e.preventDefault();
     setBusy(true);
     api("/email", { method: "POST", body: form })
-      .then(() => { toast("Connected. Your bot can now be emailed."); setForm({ address: "", password: "", imapHost: "", smtpHost: "" }); reload(); })
+      .then(() => { toast("Connected. Your bot can now be emailed."); setForm({ address: "", password: "", imapHost: "", smtpHost: "" }); reload(); onChange?.(); })
       .catch(fail)
       .finally(() => setBusy(false));
   };
   const email = data?.email;
-  return html`<div class="section-title">Agent email</div>
+  return html`${title ? html`<div class="section-title">${title}</div>` : null}
     ${email
       ? html`<div class="row"><div class="grow"><b>${email.address}</b><span>${email.bot} reads it · ${email.lastCheck ? (email.lastCheck.ok ? `checked ${fmtDay(Date.parse(email.lastCheck.at))}` : `last check failed: ${email.lastCheck.error}`) : "checks every 2 minutes"}</span></div>
           <button class="btn small" onClick=${() => api("/email/check", { method: "POST" }).then((r) => { toast(r.found ? `${r.found} new email${r.found === 1 ? "" : "s"}` : "No new email"); reload(); }).catch(fail)}>Check now</button>
           <button class="icon-btn" onClick=${() => confirm(`Disconnect ${email.address}?`) && api("/email", { method: "DELETE" }).then(reload).catch(fail)} aria-label="Disconnect"><${I.trash} /></button></div>
         <p class="hint">People can email this address. ${email.bot} reads new mail, tells you what matters, and drafts replies. Nothing is sent until you approve the draft.</p>`
-      : html`<p class="hint" style="margin-top:0">Give your bot its own email address. Make a new mailbox for it (for example a new Gmail), turn on 2-step verification there, create an app password, and enter both here. Every email it sends is a draft you approve first.</p>
+      : html`<p class="hint" style="margin-top:0">Give your bot its own email address. Make a new mailbox for it (for example a new Gmail), turn on 2-step verification there, <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener">create an app password</a>, and enter both here. Every email it sends is a draft you approve first.</p>
         <form class="email-form" onSubmit=${save}>
           <input id="email-address" class="input" type="email" placeholder="blip.yourname@gmail.com" value=${form.address} onInput=${f("address")} onBlur=${checkPreset} autocapitalize="off" />
           <input id="email-password" class="input" type="password" placeholder="App password" value=${form.password} onInput=${f("password")} autocomplete="off" />
@@ -2224,6 +2395,14 @@ function SettingsSheet({ st, onClose, focus }) {
           <button class="icon-btn" onClick=${() => api(`/connectors/${c.name}`, { method: "DELETE" }).then(reloadConnectors).catch(fail)} aria-label="Remove"><${I.trash} /></button></div>`)}</div>`
       : html`<p class="hint">None yet — ask a bot “connect my Notion”. Most sites already work through the bot's browser once you sign in.</p>`}
 
+    <div class="section-title">Use Blip anywhere</div>
+    <button class="row anywhere-row" onClick=${() => ui.openSheet({ type: "anywhere" })}>
+      <span class=${`s-dot ${st.anywhere?.status === "on" ? "live" : st.anywhere?.status === "needs-you" ? "wait" : ""}`} />
+      <div class="grow"><b>${st.anywhere?.status === "on" ? (st.anywhere.permanent ? "On · permanent link" : "On · quick link") : st.anywhere?.status === "starting" ? "Starting…" : st.anywhere?.status === "needs-you" ? "Needs one tap" : "Off: your phone only works on the home Wi-Fi"}</b>
+        <span>${st.anywhere?.url || "Reach Blip from any network, in any country. Nothing to install on the phone."}</span></div>
+      <${I.chevron} />
+    </button>
+
     <${PairPhone} />
 
     <div class="section-title">This device</div>
@@ -2235,12 +2414,17 @@ function SettingsSheet({ st, onClose, focus }) {
 }
 
 function NewBotSheet({ onClose, onCreated }) {
-  const [tpl] = useLoad(() => api("/templates"), []);
+  const [tpl, reloadTpl] = useLoad(() => api("/templates"), []);
   const [form, setForm] = useState({ name: "", job: "", style: "" });
   const create = (body) => api("/bots", { method: "POST", body }).then(({ id }) => { onClose(); onCreated(id, !body.template); }).catch(fail);
   const f = (k) => (e) => setForm({ ...form, [k]: e.target.value });
   return html`<${Sheet} title="New bot" onClose=${onClose}>
-    <div class="section-title">Start from a template</div>
+    ${tpl?.custom?.length
+      ? html`<div class="section-title">Your templates</div>
+        <div class="grid-cards">${tpl.custom.map((t) => html`<div class="tpl-wrap"><button class="tpl" onClick=${() => create({ template: t.key })}><${Blip} size=${48} still tight look=${t.look} /><b>${t.label}</b><span>${t.job.slice(0, 90)}${t.job.length > 90 ? "…" : ""}</span></button>
+          <button class="icon-btn tpl-del" aria-label=${`Remove template ${t.label}`} onClick=${() => api(`/templates/${encodeURIComponent(t.key)}`, { method: "DELETE" }).then(() => { reloadTpl(); toast("Template removed"); }).catch(fail)}><${I.close} /></button></div>`)}</div>
+        <div class="section-title" style="margin-top:22px">Ready-made</div>`
+      : html`<div class="section-title">Start from a template</div>`}
     <div class="grid-cards">${tpl ? Object.entries(tpl.bots).map(([key, t]) => html`<button class="tpl" onClick=${() => create({ template: key })}><${Blip} size=${48} still tight look=${t.look} /><b>${t.label}</b><span>${t.job.slice(0, 90)}…</span></button>`) : null}</div>
     <div class="section-title" style="margin-top:22px">Or make your own</div>
     <div style="display:flex;gap:10px">
@@ -2314,7 +2498,10 @@ function BotSheet({ bot, st, onClose, onStyle }) {
   const alias = bot.model === "auto" ? "auto" : st.models.find((m) => m.id === bot.model)?.alias || bot.model;
   const patch = (body) => api(`/bots/${bot.id}`, { method: "PATCH", body }).then(loadState).then(() => true, (e) => (fail(e), false));
   const f = (k) => (e) => setForm({ ...form, [k]: e.target.value });
+  const [today] = useLoad(() => api("/today"), []);
+  const mine = today?.find((t) => t.botId === bot.id);
   return html`<${Sheet} title=${bot.name} onClose=${onClose}>
+    <div class="today-line">${!today ? "…" : !mine?.tasks ? html`<b>Today:</b> nothing yet.` : html`<b>Today:</b> ${mine.tasks} task${mine.tasks === 1 ? "" : "s"} · ${mine.done} done${mine.failed ? html` · <span class="bad">${mine.failed} failed</span>` : ""} · ${mine.minutes || "<1"} min${mine.recent[0] ? ` · latest: ${short(mine.recent[0].label, 48)}` : ""}`}</div>
     <div class="row" style="border:1px solid var(--line);border-radius:16px;margin-bottom:16px">
       <${Blip} size=${64} look=${bot.look} />
       <div class="grow"><b>${bot.name}'s Blip</b><span>Hats, glasses, mustaches, a ₿ chain and more.</span></div>
@@ -2337,6 +2524,8 @@ function BotSheet({ bot, st, onClose, onStyle }) {
     <div class="toggle-row"><div class="grow"><b>Primary bot</b><span>Runs proactive check-ins and offers to help.</span></div>${st.primaryBotId === bot.id ? html`<span class="chip">Primary</span>` : html`<button class="btn small" onClick=${() => patch({ primary: true })}>Make primary</button>`}</div>
     <div style="display:flex;gap:8px;margin-top:18px;flex-wrap:wrap">
       <button class="btn" onClick=${() => api(`/bots/${bot.id}/fresh`, { method: "POST" }).then(() => { toast("New chat started — memory kept"); onClose(); }).catch(fail)}><${I.new} /> New chat</button>
+      <button class="btn" onClick=${() => api(`/bots/${bot.id}/duplicate`, { method: "POST" }).then(({ id }) => loadState().then(() => { onClose(); ui.select(id); toast(`Made a copy of ${bot.name}`); })).catch(fail)}><${I.copy} /> Duplicate</button>
+      <button class="btn" onClick=${() => api(`/bots/${bot.id}/template`, { method: "POST" }).then(() => toast(`Saved ${bot.name} as a template. Find it under New bot.`)).catch(fail)}><${I.book} /> Save as template</button>
       ${st.bots.length > 1 ? html`<button class="btn danger" onClick=${() => confirm(`Delete ${bot.name}, its chat and its routines?`) && api(`/bots/${bot.id}`, { method: "DELETE" }).then(() => { loadState(); onClose(); }).catch(fail)}><${I.trash} /> Delete bot</button>` : null}
     </div>
   <//>`;
@@ -2372,6 +2561,8 @@ const STARTERS = [
   { title: "Morning brief", sub: "Inbox and day, every morning at 8", icon: "clock", routine: "inbox" },
   { title: "What am I forgetting?", sub: "A daily sweep for loose ends", icon: "bell", routine: "forgetting" },
   { title: "Teach me a task", sub: "Show it once; I'll repeat it", icon: "book", sheet: { type: "skills" } },
+  { title: "New bot from a template", sub: "Researcher, Inbox, Deal hunter…", icon: "plus", sheet: { type: "newbot" } },
+  { title: "Start a group chat", sub: "Several bots on one job", icon: "users", sheet: { type: "newgroup" }, needsBots: 2 },
   { title: "Check Mac access", sub: "Calendar, Mail, screen and more", icon: "shield", sheet: { type: "settings", focus: "this-mac" } },
   { title: "Research a topic", sub: "A short PDF report", icon: "files", text: "Research this and send me a short PDF report: " },
   { title: "Find the best price", sub: "Compare shops for you", icon: "pulse", text: "Find the best price on " },
@@ -2387,9 +2578,10 @@ function StarterTiles({ bot, onPreset }) {
     else if (x.sheet) ui.openSheet(x.sheet);
     else onPreset(x.text);
   };
-  return html`<div class="tiles">${(bot.group ? GROUP_STARTERS : STARTERS).map((x) => {
+  const list = (bot.group ? GROUP_STARTERS : STARTERS).filter((x) => !x.needsBots || (store.state?.bots.length || 0) >= x.needsBots);
+  return html`<div class="tiles">${list.map((x, i) => {
     const Icon = I[x.icon] || I.plus;
-    return html`<button class="tile" onClick=${() => start(x)}><span class="tile-icon"><${Icon} /></span><b>${x.title}</b><span>${x.sub}</span></button>`;
+    return html`<button class="tile" style=${`--k:${i}`} onClick=${() => start(x)}><span class="tile-icon"><${Icon} /></span><b>${x.title}</b><span>${x.sub}</span></button>`;
   })}</div>`;
 }
 
@@ -2486,6 +2678,7 @@ function ChatView({ st, bot, onMenu, panel, setPanel, onSheet, onImage, setContr
       <button class="icon-btn" onClick=${() => onSheet({ type: "bot" })} aria-label=${bot.group ? "Group settings" : "Bot settings"} title=${bot.group ? "Group settings" : "Bot settings"}><${I.more} /></button>
     </header>
     <${ActivityStrip} st=${st} />
+    <${SetupBanner} st=${st} />
     <${InstallHint} />
     <${SuggestionTray} messages=${messages} />
     <${MessageList} bot=${bot} messages=${messages} onImage=${onImage} onTakeover=${() => { setPanel("computer"); setControl(true); }} />
@@ -2530,6 +2723,226 @@ function GroupSheet({ st, group, onClose, onCreated, onDeleted }) {
   <//>`;
 }
 
+/**
+ * ⌘K: one search box for everything: bots and groups to jump to, skills to run, routines, and app actions.
+ * Arrow keys and Enter, or tap. Opened from the sidebar's Search on phones.
+ */
+function Palette({ st, bot, onClose, onSelect, onSheet, setControl }) {
+  const [q, setQ] = useState("");
+  const [index, setIndex] = useState(0);
+  const [skills] = useLoad(() => api("/skills"), []);
+  const [routines] = useLoad(() => api("/routines"), []);
+  const input = useRef();
+  useLayoutEffect(() => input.current?.focus(), []); // at once, so letters typed right after ⌘K aren't lost
+  const run = (fn) => () => (onClose(), fn());
+  const all = [
+    ...st.bots.map((b) => ({ group: "Bots", label: b.name, sub: b.job, bot: b, act: run(() => onSelect(b.id)) })),
+    ...(st.groups || []).map((g) => ({ group: "Groups", label: g.name, sub: "Group chat", bot: groupAsBot(g, st), act: run(() => onSelect(g.id)) })),
+    { group: "Actions", label: "Control center", sub: "Approvals, routines, skills, today", icon: I.grid, act: run(() => onSheet({ type: "control" })) },
+    { group: "Actions", label: `New chat with ${bot.name}`, sub: "Memory is kept", icon: I.new, act: run(() => api(bot.group ? `/groups/${bot.id}/fresh` : `/bots/${bot.id}/fresh`, { method: "POST" }).then(() => loadThread(bot.id)).then(() => toast("New chat")).catch(fail)) },
+    { group: "Actions", label: "New bot", sub: "From a template or your own", icon: I.plus, act: run(() => onSheet({ type: "newbot" })) },
+    ...(st.bots.length >= 2 ? [{ group: "Actions", label: "New group chat", sub: "Several bots on one job", icon: I.users, act: run(() => onSheet({ type: "newgroup" })) }] : []),
+    { group: "Actions", label: "Remote control", sub: "See and use the Mac's screen", icon: I.computer, act: run(() => setControl(true)) },
+    { group: "Actions", label: "Check in now", sub: "Look around for anything slipping", icon: I.pulse, act: run(() => api("/proactive/run", { method: "POST" }).then((r) => toast(r.started ? "Checking in now" : "A check-in is already running")).catch(fail)) },
+    { group: "Actions", label: "Teach a task", sub: "Record it once on the Mac", icon: I.book, act: run(() => onSheet({ type: "skills" })) },
+    { group: "Actions", label: "Routines", sub: "Scheduled and event routines", icon: I.clock, act: run(() => onSheet({ type: "routines" })) },
+    { group: "Actions", label: "Activity", sub: "Every task and approval", icon: I.pulse, act: run(() => onSheet({ type: "activity" })) },
+    { group: "Actions", label: "Settings", sub: "Rules, secrets, this Mac, phone", icon: I.gear, act: run(() => onSheet({ type: "settings" })) },
+    { group: "Actions", label: "Use Blip anywhere", sub: "Your phone, from any network", icon: I.computer, act: run(() => onSheet({ type: "anywhere" })) },
+    ...(skills || []).map((s) => ({ group: "Skills", label: s.name, sub: `Run with ${bot.name} · ${s.description}`, icon: I.play, act: run(() => api(`/skills/${s.name}/run`, { method: "POST", body: { botId: bot.id } }).then(() => toast(`Running ${s.name}`)).catch(fail)) })),
+    ...(routines || []).map((r) => ({ group: "Routines", label: r.name, sub: `${r.bot} · ${r.when || r.scheduleText || r.schedule}`, icon: I.repeat, act: run(() => onSheet({ type: "routines" })) })),
+  ];
+  // Best matches first: starts with the words, then contains them, then letters in order.
+  const score = (it) => {
+    if (!q.trim()) return 1;
+    const hay = `${it.label} ${it.sub || ""}`.toLowerCase(), n = q.trim().toLowerCase();
+    if (it.label.toLowerCase().startsWith(n)) return 4;
+    if (it.label.toLowerCase().includes(n)) return 3;
+    if (hay.includes(n)) return 2;
+    let j = 0;
+    for (const c of it.label.toLowerCase()) if (c === n[j]) j++;
+    return j === n.length ? 1 : 0;
+  };
+  const items = all.map((it) => ({ it, s: score(it) })).filter((x) => x.s > 0).sort((a, b) => b.s - a.s).map((x) => x.it).slice(0, q.trim() ? 12 : 30);
+  const order = q.trim() ? items : ["Bots", "Groups", "Actions", "Skills", "Routines"].flatMap((g) => items.filter((x) => x.group === g));
+  useEffect(() => setIndex(0), [q]);
+  const listRef = useRef();
+  useEffect(() => listRef.current?.querySelector(".pal-item.on")?.scrollIntoView({ block: "nearest" }), [index]);
+  const onKey = (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      setIndex((i) => (i + (e.key === "ArrowDown" ? 1 : -1) + order.length) % Math.max(1, order.length));
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      order[index]?.act();
+    } else if (e.key === "Escape") onClose();
+  };
+  let lastGroup = "";
+  return html`<div class="palette-wrap" onClick=${(e) => e.target === e.currentTarget && onClose()}>
+    <div class="palette" role="dialog" aria-label="Search">
+      <div class="pal-search"><${I.search} /><input ref=${input} placeholder="Search bots, skills, routines, actions…" value=${q} onInput=${(e) => setQ(e.target.value)} onKeyDown=${onKey} autocomplete="off" spellcheck="false" /><span class="kbd">esc</span></div>
+      <div class="pal-list" ref=${listRef} role="listbox">
+        ${order.length ? order.map((it, i) => {
+          const head = !q.trim() && it.group !== lastGroup ? ((lastGroup = it.group), html`<div class="pal-group">${it.group}</div>`) : null;
+          const Icon = it.icon;
+          return html`${head}<button role="option" aria-selected=${i === index} class=${`pal-item ${i === index ? "on" : ""}`} onMouseMove=${() => i !== index && setIndex(i)} onClick=${it.act}>
+            ${it.bot ? html`<${Avatar} bot=${it.bot} size=${26} still />` : html`<span class="r-icon"><${Icon} /></span>`}
+            <span class="grow"><b>${it.label}</b>${it.sub ? html`<span>${it.sub}</span>` : null}</span>
+            ${q.trim() ? html`<span class="pal-kind">${it.group.replace(/s$/, "")}</span>` : null}
+          </button>`;
+        }) : html`<div class="empty" style="padding:28px">Nothing matches “${q}”.</div>`}
+      </div>
+    </div>
+  </div>`;
+}
+
+/**
+ * The control center: everything Blip is doing and set to do, on one screen. What needs you, what's running,
+ * what each bot did today, every routine (next, last, worked or not) and every skill (version, last used).
+ */
+function ControlSheet({ st, bot, onClose, onSelect }) {
+  const rt = st.runtime;
+  const busy = rt.running.length + rt.queued.length;
+  const [today, reloadToday] = useLoad(() => api("/today"), []);
+  const [routines, reloadRoutines] = useLoad(() => api("/routines"), []);
+  // When a task starts or ends, refresh in place (no flash of "Loading…").
+  const firstBusy = useRef(true);
+  useEffect(() => {
+    if (firstBusy.current) return void (firstBusy.current = false);
+    reloadToday();
+    reloadRoutines();
+  }, [busy]);
+  const [skills] = useLoad(() => api("/skills"), []);
+  const now = useNow(rt.running.length > 0, 1000);
+  const needs = (rt.pending || []).filter((p) => p.blocking);
+  const nameOf = (id) => botById(id)?.name || (st.groups || []).find((g) => g.id === id)?.name || "Blip";
+  const sum = (k) => (today || []).reduce((n, t) => n + t[k], 0);
+  const test = (r) => api(`/routines/${r.id}/run`, { method: "POST" }).then(() => { toast(`Test run of "${r.name}" started`); reloadRoutines(); }).catch(fail);
+  const runSkill = (s) => api(`/skills/${s.name}/run`, { method: "POST", body: { botId: bot.id } }).then(() => { toast(`Running ${s.name}`); onClose(); }).catch(fail);
+  const statusIcon = (s) => html`<span class=${`state-dot ${s === "failed" ? "bad" : ""}`}><${s === "done" ? I.okCircle : s === "failed" ? I.xCircle : I.dash} /></span>`;
+  return html`<${Sheet} title="Control center" onClose=${onClose}>
+    <div class="cc-stats">
+      <div class=${needs.length ? "warn" : ""}><b>${needs.length}</b><span>Need you</span></div>
+      <div><b>${rt.running.length}</b><span>Running</span></div>
+      <div><b>${today ? sum("tasks") : "–"}</b><span>Tasks today</span></div>
+      <div class=${today && sum("failed") ? "bad" : ""}><b>${today ? sum("failed") : "–"}</b><span>Failed today</span></div>
+    </div>
+
+    ${needs.length ? html`<div class="section-title">Needs you</div>
+      <div class="list">${needs.map((p) => html`<button class="row cc-row" onClick=${() => onSelect(p.botId)}><span class="s-dot wait" /><div class="grow"><b>${p.title}</b><span>${nameOf(p.botId)} · tap to answer</span></div><${I.chevron} /></button>`)}</div>` : null}
+
+    ${rt.running.length ? html`<div class="section-title">Running now</div>
+      <div class="list">${rt.running.map((r) => html`<button class="row cc-row" onClick=${() => onSelect(r.threadId || r.botId)}><${Avatar} bot=${botById(r.botId)} size=${28} still /><div class="grow"><b>${nameOf(r.botId)} · ${r.label}</b><span>${r.step}</span></div><span class="status-time">${dur(now - r.startedAt)}</span></button>`)}</div>` : null}
+
+    <div class="section-title">Today</div>
+    <div class="list">${(today || []).map((t) => {
+      const b = botById(t.botId);
+      if (!b) return null;
+      return html`<button class="row cc-row" onClick=${() => onSelect(b.id)}><${Avatar} bot=${b} size=${28} still /><div class="grow"><b>${b.name}</b><span>${t.tasks ? `${t.tasks} task${t.tasks === 1 ? "" : "s"} · ${t.done} done${t.failed ? ` · ${t.failed} failed` : ""} · ${t.minutes || "<1"} min${t.recent[0] ? ` · ${t.recent[0].label}` : ""}` : "Nothing yet today"}</span></div><${I.chevron} /></button>`;
+    })}</div>
+
+    <div class="section-title">Routines</div>
+    ${routines === null ? html`<div class="empty">Loading…</div>` : routines.length ? html`<div class="list">${routines.map((r) => html`<div class="row">
+      ${r.lastRun ? statusIcon(r.lastRun.status) : html`<span class="state-dot"><${I.dash} /></span>`}
+      <div class="grow"><b>${r.name}</b><span>${r.bot} · ${r.when || `${r.scheduleText || r.schedule}${r.next ? ` · next ${fmtDay(r.next)}` : ""}`}</span>
+        <span class=${`row-meta ${r.lastRun?.status === "failed" ? "bad" : ""}`}>${r.lastRun ? `Last run ${ago(Date.parse(r.lastRun.at))} · ${{ done: "worked", failed: `failed${r.lastRun.summary ? `: ${r.lastRun.summary}` : ""}`, stopped: "stopped", "nothing new": "nothing new" }[r.lastRun.status] || r.lastRun.status}` : "Hasn't run yet"}</span></div>
+      <button class="btn small" onClick=${() => test(r)}><${I.play} /> Test</button>
+    </div>`)}</div>` : html`<div class="hint">No routines yet. Ask a bot: “every weekday at 9, check my inbox for invoices”.</div>`}
+
+    <div class="section-title">Skills</div>
+    ${skills === null ? html`<div class="empty">Loading…</div>` : skills.length ? html`<div class="list">${skills.map((s) => html`<div class="row">
+      <div class="grow"><b>${s.name}</b><span>${s.description}</span><span class="row-meta">v${s.version || 1} · ${s.lastUsed ? `last used ${ago(Date.parse(s.lastUsed))}` : "not used yet"}</span></div>
+      <button class="btn small" onClick=${() => runSkill(s)}><${I.play} /> Run</button>
+    </div>`)}</div>` : html`<div class="hint">No skills yet. Teach one from Skills, or say “save this as a skill” after a job.</div>`}
+    <p class="hint" style="margin-top:14px"><button class="link-btn" onClick=${() => { reloadToday(); reloadRoutines(); }}>Refresh</button></p>
+  <//>`;
+}
+
+/** On the Mac, until it's done: one line inviting you to put Blip on your phone, from anywhere. */
+function SetupBanner({ st }) {
+  if (st.setupDone || coarse || st.anywhere?.status === "on") return null;
+  const later = () => api("/reach/done", { method: "POST" }).then(loadState).catch(fail);
+  return html`<div class="setup-banner">
+    <${Blip} size=${34} state="idle" tight />
+    <div class="grow"><b>Put Blip on your phone, from anywhere</b><span>Two minutes. Works from any network or country, nothing to install on the phone.</span></div>
+    <button class="btn small primary" onClick=${() => ui.openSheet({ type: "anywhere" })}>Set up</button>
+    <button class="btn small ghost" onClick=${later}>Later</button>
+  </div>`;
+}
+
+/**
+ * "Use Blip anywhere": the guided setup. 1) turn on a public link (Cloudflare quick link, or a permanent one
+ * with Tailscale), 2) your email, 3) Blip's own mailbox to send from, 4) get the link: by email, or by
+ * scanning a QR code on this screen with your phone's camera.
+ */
+function AnywhereSheet({ st, onClose }) {
+  const [r, setR] = useState(null);
+  const [busy, setBusy] = useState(null);
+  const [email, setEmail] = useState("");
+  const [qrTick, setQrTick] = useState(0);
+  const load = () => api("/reach").then((x) => { setR(x); setEmail((e) => e || x.owner || ""); }).catch(fail);
+  useEffect(() => void load(), []);
+  // While it's starting (or waiting for you in Tailscale), keep checking.
+  useEffect(() => {
+    if (!r || !["starting", "needs-you"].includes(r.status)) return;
+    const t = setInterval(load, 1500);
+    return () => clearInterval(t);
+  }, [r?.status]);
+  useEffect(() => {
+    if (r?.status !== "on") return;
+    const t = setInterval(() => setQrTick((x) => x + 1), 10 * 60_000); // a fresh one-time code before the old one expires
+    return () => clearInterval(t);
+  }, [r?.status]);
+  const act = (key, p) => {
+    setBusy(key);
+    return p.then((x) => { if (x && x.mode !== undefined) setR(x); return x; }).catch(fail).finally(() => setBusy(null));
+  };
+  const turnOn = (mode) => act(mode, api("/reach", { method: "POST", body: { mode } }));
+  const saveEmail = (e) => { e.preventDefault(); act("owner", api("/reach/owner", { method: "POST", body: { email } })).then((x) => x && toast("Saved")); };
+  const send = () => act("send", api("/reach/email", { method: "POST" })).then((x) => x && toast(`Sent to ${x.owner}. Open it on your phone.`));
+  const done = () => api("/reach/done", { method: "POST" }).then(loadState).then(onClose).catch(fail);
+  if (!r) return html`<${Sheet} title="Use Blip anywhere" onClose=${onClose}><div class="empty">Loading…</div><//>`;
+  const on = r.status === "on";
+  const step = (n, ok, title, body) => html`<div class=${`step ${ok ? "ok" : ""}`}>
+    <span class="step-n">${ok ? html`<${I.check} />` : n}</span>
+    <div class="step-body"><b>${title}</b>${body}</div>
+  </div>`;
+  return html`<${Sheet} title="Use Blip anywhere" onClose=${onClose}>
+    <p class="hint" style="margin-top:0">Reach Blip from your phone on any network, even from another country. The phone needs nothing installed; Blip stays on this Mac, behind your sign-in.</p>
+    <div class="steps-list">
+      ${step(1, on, "Turn on your link", html`
+        ${on
+          ? html`<div class="reach-on"><span class="s-dot live" /><span class="grow mono">${r.url}</span><button class="btn small" onClick=${() => copyText(r.url, "Link copied")}>Copy</button></div>
+            <p class="hint">${r.permanent ? "Permanent link (Tailscale)." : "Quick link (Cloudflare). It changes when this Mac restarts; Blip emails you the new one each time."}</p>`
+          : r.status === "starting" ? html`<div class="reach-on"><${Blip} size=${26} state="working" tight /><span class="grow">Opening a secure link…</span></div>`
+          : r.status === "needs-you" ? html`<div class="reach-on warn"><span class="s-dot wait" /><span class="grow">${r.error}</span>${r.enableUrl ? html`<a class="btn small primary" href=${r.enableUrl} target="_blank" rel="noopener">Allow</a>` : null}</div>`
+          : html`${r.error ? html`<p class="hint bad">${r.error}</p>` : null}`}
+        <div class="choice-row">
+          <button class=${`choice ${r.mode === "cloudflare" ? "on" : ""}`} disabled=${!!busy || !r.tools.cloudflare} onClick=${() => turnOn("cloudflare")}>
+            <b>Quick link</b><span>${r.tools.cloudflare ? "No account needed. Recommended to start." : "Run ./blip.sh setup on the Mac first."}</span></button>
+          <button class=${`choice ${r.mode === "tailscale" ? "on" : ""}`} disabled=${!!busy} onClick=${() => (r.tools.tailscale ? turnOn("tailscale") : window.open("https://tailscale.com/download/mac", "_blank"))}>
+            <b>Permanent link</b><span>${r.tools.tailscale ? "With Tailscale on this Mac. Never changes." : "Install Tailscale on this Mac (free), sign in, come back."}</span></button>
+        </div>
+        ${r.mode !== "off" ? html`<button class="link-btn" onClick=${() => turnOn("off")}>Turn off</button>` : null}`)}
+      ${step(2, !!r.owner, "Your email", html`
+        <form class="type-row" onSubmit=${saveEmail}><input class="input" type="email" placeholder="you@example.com" value=${email} onInput=${(e) => setEmail(e.target.value)} autocapitalize="off" /><button class="btn small primary" disabled=${!email.includes("@") || busy === "owner"}>Save</button></form>
+        <p class="hint">Where Blip sends your link and sign-in steps.</p>`)}
+      ${step(3, !!r.agentEmail, "Blip's email (to send from)", r.agentEmail
+        ? html`<p class="hint">Sends from <b>${r.agentEmail}</b>.</p>`
+        : html`<${AgentEmail} st=${st} title="" onChange=${load} />`)}
+      ${step(4, !!r.lastEmailAt, "Get it on your phone", html`
+        <div class="get-row">
+          <div class="grow">
+            <button class="btn primary" disabled=${!on || !r.owner || !r.agentEmail || busy === "send"} onClick=${send}>${busy === "send" ? "Sending…" : r.lastEmailAt ? "Email me again" : "Email me the link"}</button>
+            <p class="hint">${r.lastEmailAt ? `Sent ${ago(Date.parse(r.lastEmailAt))}. ` : ""}Open the email on your phone and tap the link: it signs you in. Then Share → Add to Home Screen.</p>
+          </div>
+          ${on ? html`<div class="qr"><img src=${`/api/reach/qr?n=${qrTick}`} alt="QR code: scan with your phone's camera" /><span>Or scan with your phone's camera</span></div>` : null}
+        </div>`)}
+    </div>
+    <div style="display:flex;justify-content:flex-end;margin-top:16px"><button class="btn" onClick=${done}>${on && r.lastEmailAt ? "Done" : "Finish later"}</button></div>
+  <//>`;
+}
+
 function Shell() {
   const s = useStore();
   const st = s.state;
@@ -2537,7 +2950,21 @@ function Shell() {
   const [panel, setPanel] = useState(() => (window.innerWidth > 1200 ? localStorage.getItem("panel") || null : null));
   const [control, setControl] = useState(false);
   const [sheet, setSheet] = useState(null);
-  const [lightbox, setLightbox] = useState(null);
+  const [lightbox, setLightbox] = useState(null); // an image url, or { list, i } for a gallery
+  const [palette, setPalette] = useState(false);
+  ui.openImage = (list, i = 0) => setLightbox({ list, i });
+  ui.openPalette = () => setPalette(true);
+  // ⌘K / Ctrl+K: jump anywhere.
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
+        e.preventDefault();
+        setPalette((p) => !p);
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
   const [botId, setBotId] = useState(() => {
     // A notification opens the app on its bot once; afterwards the URL mustn't keep overriding your choice.
     const fromLink = new URLSearchParams(location.search).get("bot");
@@ -2589,6 +3016,8 @@ function Shell() {
     ${sheet?.type === "routines" ? html`<${RoutinesSheet} st=${st} botId=${bot.id} onClose=${() => setSheet(null)} />` : null}
     ${sheet?.type === "skills" ? html`<${SkillsSheet} setControl=${setControl} botId=${bot.id} initial=${sheet.open} onClose=${() => setSheet(null)} />` : null}
     ${sheet?.type === "activity" ? html`<${ActivitySheet} onClose=${() => setSheet(null)} />` : null}
+    ${sheet?.type === "anywhere" ? html`<${AnywhereSheet} st=${st} onClose=${() => setSheet(null)} />` : null}
+    ${sheet?.type === "control" ? html`<${ControlSheet} st=${st} bot=${bot} onClose=${() => setSheet(null)} onSelect=${(id) => { setSheet(null); select(id); }} />` : null}
     ${sheet?.type === "settings" ? html`<${SettingsSheet} st=${st} focus=${sheet.focus} onClose=${() => setSheet(null)} />` : null}
     ${sheet?.type === "newbot" ? html`<${NewBotSheet} onClose=${() => setSheet(null)} onCreated=${(id, custom) => loadState().then(() => { select(id); if (custom) setSheet({ type: "style" }); })} />` : null}
     ${sheet?.type === "bot" && !bot.group ? html`<${BotSheet} bot=${bot} st=${st} onClose=${() => setSheet(null)} onStyle=${() => setSheet({ type: "style" })} />` : null}
@@ -2596,8 +3025,9 @@ function Shell() {
     ${sheet?.type === "newgroup" ? html`<${GroupSheet} st=${st} onClose=${() => setSheet(null)} onCreated=${(id) => loadState().then(() => { setSheet(null); select(id); })} />` : null}
     ${sheet?.type === "style" ? html`<${StyleSheet} bot=${bot} onClose=${() => setSheet(null)} />` : null}
     ${control ? html`<${RemoteView} onClose=${() => setControl(false)} />` : null}
-    ${lightbox ? html`<div class="lightbox" onClick=${() => setLightbox(null)}><img src=${lightbox} alt="" /></div>` : null}
-    ${s.toast ? html`<div class="toast">${s.toast}</div>` : null}
+    ${lightbox ? html`<${Lightbox} box=${lightbox} onClose=${() => setLightbox(null)} />` : null}
+    ${palette ? html`<${Palette} st=${st} bot=${bot} onClose=${() => setPalette(false)} onSelect=${select} onSheet=${setSheet} setControl=${setControl} />` : null}
+    <${Toast} t=${s.toast} />
   </div>`;
 }
 
@@ -2618,6 +3048,7 @@ function OfflineScreen() {
       <li>Is the Mac on, awake and on the charger?</li>
       <li>Is it connected to the internet, with Tailscale on?</li>
       <li>After a restart, Blip starts by itself once you're logged in.</li>
+      <li>Using the quick anywhere link? It changes when the Mac restarts. Check your email for Blip's new link.</li>
     </ul>
   </div>`;
 }
@@ -2693,7 +3124,7 @@ function App() {
   }, [authed]);
   if (authed === null && offlineSince) return html`<${OfflineScreen} />`;
   if (authed === null) return html`<div class="boot"><${Blip} size=${48} state="working" /></div>`;
-  if (!authed) return html`<${Login} onDone=${boot} />${s.toast ? html`<div class="toast">${s.toast}</div>` : null}`;
+  if (!authed) return html`<${Login} onDone=${boot} /><${Toast} t=${s.toast} />`;
   if (!s.state) return html`<div class="boot"><${Blip} size=${48} state="working" /></div>`;
   return html`<${Shell} />`;
 }

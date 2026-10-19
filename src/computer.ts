@@ -7,7 +7,7 @@
 // busy with a new task, its engine can't be closed without killing that task, so others wait until it's done
 // (and the bot itself may pick the browser straight back up, since it already has it).
 
-type Run = { runId: string; botId: string; botName: string };
+type Run = { runId: string; botId: string; botName: string }; // botId: the lane (bot + chat) whose engine opens Chrome
 type Waiter = Run & { resolve: () => void; reject: (e: Error) => void; onWait: (holderName: string) => void };
 type Engines = { close: (botId: string) => Promise<void>; busy: (botId: string) => boolean };
 

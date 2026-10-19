@@ -1,6 +1,6 @@
 // Service worker: makes the app installable, keeps it opening when the Mac is unreachable (so it can say
 // "offline since …" instead of a blank page), and shows push notifications.
-const SHELL = "blip-shell-v2";
+const SHELL = "blip-shell-v3";
 self.addEventListener("install", (event) => {
   self.skipWaiting();
   event.waitUntil(caches.open(SHELL).then((c) => c.addAll(["/", "/app.js", "/styles.css", "/vendor/preact.mjs", "/vendor/hooks.mjs", "/vendor/htm.mjs"]).catch(() => {})));
@@ -43,7 +43,7 @@ self.addEventListener("push", (event) => {
       // Quick answers on the notification itself (Android, and Chrome on desktop; iPhone shows just the text).
       actions: data.card ? data.card.actions : [],
       requireInteraction: !!data.card,
-      data: { botId: data.botId, cardId: data.card && data.card.id },
+      data: { botId: data.botId, cardId: data.card && data.card.id, url: data.url },
     }),
   );
 });
@@ -83,5 +83,7 @@ self.addEventListener("notificationclick", (event) => {
     const label = ((event.notification.actions || []).find((a) => a.action === event.action) || {}).title || event.action;
     return event.waitUntil(answerFromNotification(data.cardId, event.action, data.botId, label));
   }
+  // "Blip has a new link": open Blip at its new address (the link signs this phone in).
+  if (data.url && /^https:\/\//.test(data.url)) return event.waitUntil(self.clients.openWindow(data.url));
   event.waitUntil(openApp(data.botId));
 });

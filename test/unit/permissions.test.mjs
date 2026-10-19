@@ -140,3 +140,21 @@ test("social clicks (like, repost, follow, reply) always ask, even with an allow
   const ok = await makeCanUseTool(c)("mcp__browser__browser_click", { element: "Search results tab Latest", ref: "e2" }, { signal: new AbortController().signal, toolUseID: "t" });
   assert.equal(ok.behavior, "allow");
 });
+
+test('"Always allow" is saved for that bot only, and another bot is still asked', async () => {
+  pick = () => "always";
+  const first = await decide("Bash", { command: "uptime" });
+  assert.equal(first.result.behavior, "allow");
+  assert.match(first.card.buttons.find((b) => b.value === "always").label, /Always allow for Tester/);
+  const rule = state.rules.find((r) => r.match === "uptime ");
+  assert.equal(rule.botId, bot.id);
+  pick = () => "deny";
+  const again = await decide("Bash", { command: "uptime" });
+  assert.equal(again.result.behavior, "allow");
+  assert.equal(again.card, undefined, "the same bot isn't asked again");
+  const other = createBot("Other", "second bot");
+  lastCard = undefined;
+  const r = await makeCanUseTool({ ...ctx(), bot: other })("Bash", { command: "uptime" }, { signal: new AbortController().signal, toolUseID: "t" });
+  assert.equal(r.behavior, "deny");
+  assert.ok(lastCard, "another bot still gets asked");
+});

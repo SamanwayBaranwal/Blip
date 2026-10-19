@@ -10,6 +10,7 @@ import { buildHelper } from "./native.js";
 import { save, state } from "./store.js";
 import { startTelegram } from "./telegram-app.js";
 import { bot as telegram } from "./telegram.js";
+import { startReach } from "./reach.js";
 import { startWeb } from "./web.js";
 
 ensureDefaultBot();
@@ -41,7 +42,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 // Screenshots and browser output only matter for a while; clear anything older than a week, daily.
 function pruneOldFiles() {
   const cutoff = Date.now() - 7 * 86_400_000;
-  for (const dir of [path.join(config.workspace, "browser"), path.join(config.workspace, "screenshots"), path.join(config.workspace, "replays"), path.join(config.dataDir, "voice")]) {
+  for (const dir of [path.join(config.workspace, "browser"), path.join(config.workspace, "screenshots"), path.join(config.workspace, "replays"), path.join(config.workspace, "proof"), path.join(config.dataDir, "voice")]) {
     try {
       for (const name of fs.readdirSync(dir)) {
         const file = path.join(dir, name);
@@ -52,9 +53,18 @@ function pruneOldFiles() {
       // folder doesn't exist yet
     }
   }
+  // Deleted skills are kept a day for Undo.
+  const trash = path.join(config.dataDir, "skill-trash");
+  try {
+    for (const name of fs.readdirSync(trash)) {
+      const dir = path.join(trash, name);
+      if (fs.statSync(dir).mtimeMs < Date.now() - 86_400_000) fs.rmSync(dir, { recursive: true, force: true });
+    }
+  } catch {}
 }
 pruneOldFiles();
 setInterval(pruneOldFiles, 24 * 3_600_000).unref();
+void startReach(); // "Use Blip anywhere", if it's on
 
 // The access code stays out of the log (bots can read files); ./blip.sh link shows it.
 console.log(`Ready. Bots: ${state.bots.map((b) => b.name).join(", ")}. Model ${config.model}. App: http://localhost:${config.webPort} (sign-in link: ./blip.sh link)`);

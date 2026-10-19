@@ -68,6 +68,8 @@ type TurnResult = { sessionId?: string; failed: boolean; costUsd: number; tools?
 type Turn = {
   onStep?: (step: string) => void;
   onResult?: (r: RunResult) => void;
+  onShot?: (file: string) => void;
+  onSay?: (text: string) => void; // something said to the user before the work is done ("On it: …"), shown at once
   onPartial?: (text: string) => void;
   onPlan?: (todos: Todo[]) => void;
   onReply: (text: string, isError: boolean, costSoFarUsd: number) => Promise<void>;
@@ -87,6 +89,10 @@ type Turn = {
 const WARM_MS = 10 * 60_000;
 const MAX_ENGINES = Math.max(1, Number(process.env.MAX_PARALLEL || 3));
 
+/** A "lane" is one bot in one chat. Each lane has its own engine and runs one task at a time, so a bot can
+ *  work in a group and in its own chat at the same time. */
+export const laneOf = (botId: string, threadId?: string) => `${botId}:${threadId ?? botId}`;
+
 class Session {
   readonly inbox = new Inbox();
   readonly abort = new AbortController();
@@ -103,9 +109,11 @@ class Session {
   retiring = false;
   private turnSent = false;
   private partial = ""; // the reply text being written right now (streamed to the app)
+  private said = ""; // text the bot wrote that's followed by more work: it goes to the chat at once
   private readonly replayTargets: { botId: string; msgId: string }[] = []; // tasks that used the browser
   lastUsed = Date.now();
   private idleTimer?: NodeJS.Timeout;
+  readonly lane: string;
 
   constructor(
     readonly bot: BotProfile,
@@ -116,11 +124,13 @@ class Session {
     model: string,
     readonly userStarted: boolean,
     readonly handoff = false,
+    readonly threadId = bot.id,
   ) {
     this.model = model;
     this.sessionId = resume;
     this.exited = new Promise((r) => (this.markExited = r));
-    this.ctx = { bot, request: "", readOnly, taskAllows: new Set<string>(), runId: "", handoff };
+    this.lane = laneOf(bot.id, threadId);
+    this.ctx = { bot, request: "", readOnly, taskAllows: new Set<string>(), runId: "", handoff, lane: this.lane };
     live.add(this);
     void this.exited.then(() => live.delete(this));
     // The agent's terminal never sees the Telegram token, and never inherits a parent Claude Code session's connection.
@@ -153,7 +163,9 @@ class Session {
           type: "stdio",
           command: process.execPath,
           args: [
-            config.playwrightCli, "--browser", "chrome", "--user-data-dir", browserProfileFor(handoff ? { ...bot, ownBrowser: true } : bot), // hand-offs never wait for the shared browser "--output-dir", `${config.workspace}/browser`,
+            // Hand-offs never wait for the shared browser; work in another chat gets its own copy of a bot's own browser.
+            config.playwrightCli, "--browser", "chrome", "--user-data-dir", browserProfileFor(handoff ? { ...bot, ownBrowser: true } : bot, threadId),
+            "--output-dir", `${config.workspace}/browser`,
             "--config", replay.configFile,
             // Background work (check-ins, routines) uses an invisible browser so windows never pop up while you
             // use the Mac; chats you start use a visible one you can watch. BLIP_BROWSER_HEADLESS hides it always.
@@ -189,6 +201,11 @@ class Session {
                 if (hook.hook_event_name === "PostToolUse") {
                   const made = resultOf(hook.tool_name, (hook.tool_input ?? {}) as Record<string, unknown>, hook.tool_response);
                   if (made) this.turn?.onResult?.(made);
+                  // Proof of work: what the browser or the Mac's screen looked like after the bot acted.
+                  if (this.turn?.onShot && SHOT_TOOLS.test(hook.tool_name)) {
+                    const file = saveProof(hook.tool_response, this.ctx.runId);
+                    if (file) this.turn.onShot(file);
+                  }
                 }
                 const clean = "tool_response" in hook ? scrub(hook.tool_response) : undefined;
                 return clean === undefined ? {} : { hookSpecificOutput: { hookEventName: "PostToolUse" as const, updatedToolOutput: clean } };
@@ -210,7 +227,7 @@ class Session {
   async runTurn(
     prompt: Content,
     request: string,
-    handlers: Pick<Turn, "onStep" | "onPlan" | "onReply" | "onPartial" | "onResult">,
+    handlers: Pick<Turn, "onStep" | "onPlan" | "onReply" | "onPartial" | "onResult" | "onShot" | "onSay">,
     userAbort: AbortSignal,
     run: { runId: string; model: string; onWait?: (holder: string | null) => void; runMsgId?: string; threadId?: string },
   ): Promise<TurnResult> {
@@ -260,7 +277,7 @@ class Session {
     clearTimeout(this.idleTimer);
     this.inbox.close();
     if (force) this.abort.abort();
-    if (sessions.get(this.bot.id) === this) sessions.delete(this.bot.id);
+    if (sessions.get(this.lane) === this) sessions.delete(this.lane);
     // If the engine doesn't wind down on its own, stop it.
     setTimeout(() => this.abort.abort(), 8000).unref();
   }
@@ -298,8 +315,17 @@ class Session {
           const u = message.parent_tool_use_id === null ? message.message.usage : undefined;
           if (u) this.bot.contextTokens = (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) + (u.output_tokens ?? 0);
           for (const block of message.message.content) {
-            if (block.type === "text" && block.text.trim()) turn.lastText = block.text;
+            if (block.type === "text" && block.text.trim()) {
+              turn.lastText = block.text;
+              if (message.parent_tool_use_id === null) this.said = block.text.trim();
+            }
             if (block.type !== "tool_use") continue;
+            // Words followed by a tool call aren't the final answer: they're the bot talking while it works
+            // ("On it: …", or answering a message sent mid-task). Show them now instead of after the job.
+            if (this.said && message.parent_tool_use_id === null) {
+              turn.onSay?.(this.said);
+              this.said = "";
+            }
             const input = block.input as Record<string, unknown>;
             if (block.name === "TodoWrite" && Array.isArray(input.todos)) turn.onPlan?.(input.todos as Todo[]);
             else turn.onStep?.(stepLabel(block.name, input, message.parent_tool_use_id !== null));
@@ -311,6 +337,7 @@ class Session {
             }
           }
         } else if (message.type === "result") {
+          this.said = ""; // the final words arrive as the reply itself
           this.sessionId = message.session_id;
           const cost = recordCost(message.session_id, message.total_cost_usd);
           // Mark the user messages this result answered; when none are left, the turn is done.
@@ -339,7 +366,7 @@ class Session {
       const turn = this.turn;
       this.turn = undefined;
       this.alive = false;
-      if (sessions.get(this.bot.id) === this) sessions.delete(this.bot.id);
+      if (sessions.get(this.lane) === this) sessions.delete(this.lane);
       if (turn && (this.outstanding.length || !this.turnSent) && !turn.userAbort.aborted) {
         // It stopped before answering: say so instead of quietly marking the task done.
         await turn.onReply("The engine stopped before it could answer. Please send that again.", true, turn.cost).catch(() => {});
@@ -351,7 +378,7 @@ class Session {
       this.turn = undefined;
       this.alive = false;
       this.inbox.close();
-      if (sessions.get(this.bot.id) === this) sessions.delete(this.bot.id);
+      if (sessions.get(this.lane) === this) sessions.delete(this.lane);
       if (turn) {
         if (turn.userAbort.aborted) {
           await turn.onReply("Stopped.", true, turn.cost);
@@ -378,7 +405,7 @@ const live = new Set<Session>(); // every engine process still running, warm or 
 export function closeWarmSession(botId?: string) {
   for (const s of [...live]) {
     if (botId && s.bot.id !== botId) continue;
-    if (sessions.get(s.bot.id) === s) sessions.delete(s.bot.id); // nothing new goes into it
+    if (sessions.get(s.lane) === s) sessions.delete(s.lane); // nothing new goes into it
     if (s.busy) s.retiring = true;
     else s.close();
   }
@@ -397,9 +424,10 @@ export async function closeAllEngines() {
   await Promise.race([Promise.all(all.map((s) => s.exited)), new Promise((r) => setTimeout(r, 8000))]);
 }
 
-/** Closes a bot's engines and waits (briefly) until they have exited, so their Chrome window is gone. */
-export async function closeEngineAndWait(botId: string, onlyWithBrowser = false) {
-  const mine = [...live].filter((s) => s.bot.id === botId && (!onlyWithBrowser || s.ctx.usedComputer));
+/** Closes a lane's engine (or all of a bot's, given a bot id) and waits (briefly) until it has exited, so its
+ *  Chrome window is gone. */
+export async function closeEngineAndWait(key: string, onlyWithBrowser = false) {
+  const mine = [...live].filter((s) => (s.lane === key || s.bot.id === key) && (!onlyWithBrowser || s.ctx.usedComputer));
   if (!mine.length) return;
   for (const s of mine) s.close();
   const allExited = Promise.all(mine.map((s) => s.exited));
@@ -411,9 +439,9 @@ export async function closeEngineAndWait(botId: string, onlyWithBrowser = false)
 }
 
 setEngines({
-  close: (botId) => closeEngineAndWait(botId, true),
+  close: (lane) => closeEngineAndWait(lane, true),
   // Busy with a task, after having opened the browser: closing it would kill that task.
-  busy: (botId) => [...live].some((s) => s.bot.id === botId && s.alive && s.busy && s.ctx.usedComputer),
+  busy: (lane) => [...live].some((s) => s.lane === lane && s.alive && s.busy && s.ctx.usedComputer),
 });
 
 /** The engine deletes conversations it hasn't touched in a while (30 days by default). Resuming one that's
@@ -443,6 +471,8 @@ export function startAgent(params: {
   onReply: (text: string, isError: boolean, costSoFarUsd: number) => Promise<void>;
   onPartial?: (text: string) => void;
   onResult?: (r: RunResult) => void; // something it made (a file, an event, a skill…), shown on the task
+  onShot?: (file: string) => void; // a screenshot of what it just did (proof of work), relative to the workspace
+  onSay?: (text: string) => void; // words to the user while it's still working
   runMsgId?: string;
   threadId?: string; // the chat it runs in (a group, or the bot's own)
   handoff?: boolean; // working for another bot: its own browser, no screen control
@@ -458,13 +488,14 @@ export function startAgent(params: {
       return { sessionId: params.resume, failed: true, costUsd: 0 };
     }
     const keepWarm = !!params.keepWarm && !params.readOnly && !usingKey; // a budgeted key session needs a fresh budget cap
-    const existing = sessions.get(params.bot.id);
+    const lane = laneOf(params.bot.id, params.threadId);
+    const existing = sessions.get(lane);
     const reusable = keepWarm && existing?.alive && !existing.busy && !existing.retiring && !existing.readOnly && existing.handoff === !!params.handoff && (!params.resume || existing.sessionId === params.resume);
     if (reusable) {
       session = existing!;
     } else {
       // Wait for the bot's old engine to exit first, so its browser releases the shared profile.
-      if ([...live].some((s) => s.bot.id === params.bot.id)) await closeEngineAndWait(params.bot.id);
+      if ([...live].some((s) => s.lane === lane)) await closeEngineAndWait(lane);
       // Keep the number of running engines in check: close the least recently used idle one.
       const idle = [...sessions.values()].filter((s) => !s.busy).sort((a, b) => a.lastUsed - b.lastUsed);
       if (sessions.size >= MAX_ENGINES && idle[0]) idle[0].close();
@@ -473,8 +504,8 @@ export function startAgent(params: {
         console.error(`[${params.bot.name}] conversation ${resume} no longer exists; starting a fresh one (memory is kept)`);
         resume = undefined;
       }
-      session = new Session(params.bot, keepWarm, !!params.readOnly, resume, usingKey ? remaining : undefined, params.model, !!params.keepWarm && !params.readOnly, !!params.handoff);
-      if (keepWarm) sessions.set(params.bot.id, session);
+      session = new Session(params.bot, keepWarm, !!params.readOnly, resume, usingKey ? remaining : undefined, params.model, !!params.keepWarm && !params.readOnly, !!params.handoff, params.threadId ?? params.bot.id);
+      if (keepWarm) sessions.set(lane, session);
     }
     return session.runTurn(params.prompt, params.request, params, params.abort.signal, { runId: params.runId, model: params.model, onWait: params.onWait, runMsgId: params.runMsgId, threadId: params.threadId });
   })();
@@ -483,7 +514,7 @@ export function startAgent(params: {
     steer(textMessage: string) {
       if (!session?.alive || !session.busy) return false;
       session.ctx.request = `${session.ctx.request}\n\nThen the user added: ${textMessage}`;
-      session.send(`[Message from the user while you're working — take it into account now]\n${textMessage}`, "next");
+      session.send(`[Message from the user while you're working: answer them in one short line right away (they see it at once), take it into account, then carry on]\n${textMessage}`, "next");
       return true;
     },
     done,
@@ -492,13 +523,38 @@ export function startAgent(params: {
 
 // What a finished tool call produced, for the chips on the task ("Event added · Dentist, Oct 21 10:00").
 // Only successful calls get here; tool errors come back with isError and are skipped.
-const HIDDEN_DIRS = /^(memory|browser|screenshots|replays|inbox|\.claude|\.history)(\/|$)/;
+const HIDDEN_DIRS = /^(memory|browser|screenshots|replays|proof|inbox|\.claude|\.history)(\/|$)/;
 const when = (v: unknown) => {
   const d = new Date(String(v ?? ""));
   if (!v || isNaN(d.getTime())) return undefined;
   const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(String(v));
   return d.toLocaleString("en-US", dateOnly ? { month: "short", day: "numeric", timeZone: "UTC" } : { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: config.timezone });
 };
+// Screenshots that come back from these tools are kept as proof of work (a few per task, shown as a gallery).
+const SHOT_TOOLS = /^mcp__browser__browser_take_screenshot$|^mcp__blip__mac_(screenshot|click|type|key|scroll|drag|open)/;
+export const PROOF_DIR = () => path.join(config.workspace, "proof");
+/** Finds the first image in a tool's result and saves it; returns its path in the workspace. */
+export function saveProof(response: unknown, runId: string): string | undefined {
+  let found: { data: string; type: string } | undefined;
+  const walk = (v: unknown, depth: number) => {
+    if (found || depth > 5 || !v || typeof v !== "object") return;
+    if (Array.isArray(v)) return v.forEach((x) => walk(x, depth + 1));
+    const o = v as Record<string, unknown>;
+    if (o.type === "image" && typeof o.data === "string") found = { data: o.data, type: String(o.mimeType ?? "image/png") };
+    else if (o.type === "image" && o.source && typeof (o.source as { data?: unknown }).data === "string") {
+      const src = o.source as { data: string; media_type?: string };
+      found = { data: src.data, type: src.media_type ?? "image/png" };
+    } else Object.values(o).forEach((x) => walk(x, depth + 1));
+  };
+  walk(response, 0);
+  if (!found || found.data.length < 2000) return undefined;
+  const dir = PROOF_DIR();
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, `${runId.slice(0, 8)}-${Date.now()}.${/jpe?g/.test(found.type) ? "jpg" : "png"}`);
+  fs.writeFileSync(file, Buffer.from(found.data, "base64"));
+  return path.relative(config.workspace, file);
+}
+
 export function resultOf(tool: string, input: Record<string, unknown>, response: unknown): RunResult | undefined {
   if (response && typeof response === "object" && (response as { isError?: boolean }).isError) return undefined;
   const str = (v: unknown) => String(v ?? "").trim();

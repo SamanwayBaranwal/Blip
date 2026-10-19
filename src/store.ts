@@ -44,6 +44,7 @@ export type RunRecord = {
   at: string;
   bot: string;
   label: string;
+  botId?: string;
   routineId?: string;
   status: "done" | "failed" | "stopped" | "nothing new";
   costUsd: number;
@@ -53,7 +54,7 @@ export type RunRecord = {
 
 /** "ask" rules stop any action whose description contains `match`; "allow" rules skip approval
  *  for a tool (optionally only when its main argument starts with `match`). Ask always wins. */
-export type Rule = { id: string; effect: "ask" | "allow"; tool: string; match?: string };
+export type Rule = { id: string; effect: "ask" | "allow"; tool: string; match?: string; botId?: string }; // botId: an "Always allow" for one bot only
 
 export type Connector = {
   type: "stdio" | "http";
@@ -72,7 +73,12 @@ type State = {
   rules: Rule[];
   routines: Routine[];
   connectors: Record<string, Connector>;
-  settings: { autoReview: boolean; proactive: boolean; proactiveMode: "morning" | "thrice"; voiceReplies: boolean; fullAccess: boolean; verify: boolean; healthcheckUrl?: string };
+  settings: { autoReview: boolean; proactive: boolean; proactiveMode: "morning" | "thrice"; voiceReplies: boolean; fullAccess: boolean; verify: boolean; healthcheckUrl?: string; anywhere?: "off" | "cloudflare" | "tailscale" };
+  /** The owner's own email (where Blip sends the phone link), and when it last did. */
+  owner?: { email: string; lastEmailAt?: string };
+  reachUrl?: string; // the last anywhere-link (to notice when it changes)
+  loginLinks?: { hash: string; expires: number }[]; // one-time sign-in links (hashes only)
+  setupDone?: boolean; // the first-run "Use Blip on your phone" steps were finished or skipped
   /** What the Mac access check found working (background runs only use these, so they never trigger a prompt). */
   macAccess?: { calendar?: boolean; reminders?: boolean; contacts?: boolean; mail?: boolean; at?: string };
   lastProactiveDay?: string;

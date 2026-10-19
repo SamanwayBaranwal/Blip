@@ -413,6 +413,54 @@ const tasks = {
     expect(label === "Fix after double-check", `fix task didn't start (${label})`);
     await call("/stop", { botId: main });
   },
+  async "browser work leaves screenshots on the task as proof"() {
+    const r = await ask(main, "Open https://example.com in the browser, take a screenshot with browser_take_screenshot, and tell me the page title in one line.", { onCard: () => "once" });
+    expect(r.status === "done", `status ${r.status}`);
+    const run = (await thread(main)).filter((m) => m.kind === "run").at(-1).run;
+    expect(run.shots?.length >= 1, "no screenshots on the task");
+    expect(fs.existsSync(path.join(home, "workspace", run.shots[0])), "the screenshot file is missing");
+  },
+  async "a duplicated bot gets its own color and answers to its full name in a group"() {
+    const { id } = await call(`/bots/${second}/duplicate`, {});
+    const st = await call("/state");
+    const copy = st.bots.find((b) => b.id === id);
+    expect(/ 2$/.test(copy.name), copy.name);
+    expect(copy.look.color && copy.look.color !== st.bots.find((b) => b.id === second).look.color, "the copy should get its own color");
+    await call(`/bots/${id}`, { model: "haiku" }, "PATCH");
+    const g = await call("/groups", { name: "Copies", members: [second, id], leadId: second });
+    await call("/send", { botId: g.id, text: `@${copy.name} reply with just the word OTTER. No tools.` });
+    let reply;
+    for (let i = 0; i < 120 && !reply; i++) {
+      reply = (await thread(g.id)).find((m) => m.kind === "text" && m.role === "bot");
+      if (!reply) await sleep(500);
+    }
+    expect(reply, "no reply in the group");
+    expect(reply.meta?.from === id, `answered by ${reply.meta?.from}, not the copy`);
+    expect(/otter/i.test(reply.text), reply.text);
+  },
+  async "a bot works in a group and answers in its own chat at the same time"() {
+    const g = await call("/groups", { name: "Lanes", members: [main, second], leadId: main });
+    await call("/send", { botId: g.id, text: `Run this exact command in the foreground and wait for it, then say done: python3 -c "import time; [time.sleep(1) for _ in range(20)]; print('finished')"` });
+    let busy = false;
+    for (let i = 0; i < 60 && !busy; i++) {
+      for (const m of (await thread(g.id)).filter((x) => x.kind === "card" && x.card.status === "pending")) await call(`/card/${m.id}`, { value: "once" });
+      busy = (await call("/state")).runtime.running.some((r) => r.threadId === g.id && r.botId === main && /Running/.test(r.step));
+      if (!busy) await sleep(500);
+    }
+    expect(busy, "the group task never started its command");
+    const r = await ask(main, "Reply with just the word PARALLEL. No tools.", { timeout: 60_000 });
+    expect(/parallel/i.test(r.replies.join(" ")), r.replies.join(" | "));
+    const still = (await call("/state")).runtime.running.some((x) => x.threadId === g.id && x.botId === main);
+    expect(still, "the group task should still be running while the bot answered in its own chat");
+    await call("/stop", { botId: g.id });
+  },
+  async "a longer job says what it's doing first, then answers"() {
+    const before = Date.now();
+    const r = await ask(main, "Use web search to find the current population of Lisbon, then answer in one line.", { onCard: () => "once" });
+    expect(r.status === "done", `status ${r.status}`);
+    const said = (await thread(main)).filter((m) => m.at > before && m.role === "bot" && m.kind === "text");
+    expect(said.length >= 2 && said[0].meta?.interim, `expected a first line while working, then the answer: ${said.map((m) => m.text.slice(0, 50)).join(" | ")}`);
+  },
   async "Auto Review lets a safe workspace write through without asking"() {
     await call("/settings", { autoReview: true }, "PATCH");
     try {

@@ -23,6 +23,7 @@ export type RunView = {
   live?: string; // the reply as it's being written (never saved to disk)
   replay?: string; // a clip of what the bot did in the browser (path in the workspace)
   bot?: string; // in a group chat: which bot this task belongs to
+  shots?: string[]; // screenshots of what it did (workspace paths): proof of work, shown as a small gallery
   results?: RunResult[]; // what it made: files, events, reminders, skills, routines (shown as chips on the task)
 };
 
@@ -49,7 +50,7 @@ export type Msg = {
   kind: "text" | "run" | "card";
   text?: string;
   files?: string[]; // paths relative to the workspace
-  meta?: { costUsd?: number; seconds?: number; voice?: boolean; header?: string; feedback?: "up" | "down"; error?: boolean; from?: string }; // from: the bot speaking in a group
+  meta?: { costUsd?: number; seconds?: number; voice?: boolean; header?: string; feedback?: "up" | "down"; error?: boolean; from?: string; interim?: boolean }; // from: the bot speaking in a group; interim: said while still working
   run?: RunView;
   card?: CardView;
 };

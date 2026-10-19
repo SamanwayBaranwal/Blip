@@ -106,7 +106,7 @@ case "$1" in
       exit 1
     fi
     echo "▸ Installing tools (Node.js, click control, speech-to-text, audio)…"
-    for pkg in node cliclick ffmpeg; do brew list "$pkg" >/dev/null 2>&1 || brew install "$pkg"; done
+    for pkg in node cliclick ffmpeg cloudflared; do brew list "$pkg" >/dev/null 2>&1 || brew install "$pkg"; done # cloudflared: "Use Blip anywhere"
     # Speech-to-text. Homebrew renamed whisper-cpp to whisper.cpp; try the new name, then the old one.
     if ! command -v whisper-cli >/dev/null; then
       HOMEBREW_NO_AUTO_UPDATE=1 brew install whisper.cpp || HOMEBREW_NO_AUTO_UPDATE=1 brew install whisper-cpp || true
@@ -129,6 +129,8 @@ case "$1" in
     echo "✅ Setup done. Next:"
     echo "   1. Sign in to Claude Code once on this Mac (Blip uses that login until you add an API key)."
     echo "   2. ./blip.sh install"
+    echo "   3. Open Blip on this Mac and tap Set up: it puts Blip on your phone, from anywhere,"
+    echo "      and emails you the link."
     ;;
   install)
     check_location

@@ -34,7 +34,7 @@ export function addSubscription(sub: webpush.PushSubscription) {
 }
 
 /** Sends a notification to every installed app. `tag` replaces an older notification with the same tag. */
-export async function push(n: { title: string; body: string; botId?: string; tag?: string; silent?: boolean; card?: { id: string; actions: { action: string; title: string }[] } }) {
+export async function push(n: { title: string; body: string; botId?: string; tag?: string; silent?: boolean; url?: string; card?: { id: string; actions: { action: string; title: string }[] } }) {
   if (!subs.length) return;
   const payload = JSON.stringify({ ...n, body: n.body.slice(0, 240) });
   const list = subs; // subs may change while sending; match results to the list they came from

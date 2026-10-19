@@ -14,6 +14,8 @@ export function memoryFile(bot: BotProfile) {
   return path.join(config.memoryDir, `${slug(bot.name)}.md`);
 }
 
+const BOT_COLORS = ["sky", "mint", "gold", "pink", "lilac", "peach"]; // ids from LOOKS.color in web/app.js
+
 export function createBot(name: string, job: string, style = "Friendly, concise, proactive."): BotProfile {
   const clean = name.trim().slice(0, 32);
   if (!clean) throw new Error("A bot needs a name.");
@@ -25,6 +27,8 @@ export function createBot(name: string, job: string, style = "Friendly, concise,
     emoji: EMOJIS[state.bots.length % EMOJIS.length]!,
     job: job.trim() || "General personal assistant",
     style,
+    // Every bot after the first gets its own Blip color, so bots are easy to tell apart in chats and lists.
+    ...(state.bots.length ? { look: { color: BOT_COLORS[(state.bots.length - 1) % BOT_COLORS.length]! } } : {}),
     createdAt: new Date().toISOString(),
   };
   state.bots.push(bot);
@@ -62,19 +66,26 @@ export function primaryBot(): BotProfile {
 
 /** The Chrome profile a bot uses: the shared one, or its own (first made as a copy of the shared one, so the
  *  user's logins carry over; caches and Chrome's lock files are left out). */
-export function browserProfileFor(bot: BotProfile) {
+export function browserProfileFor(bot: BotProfile, threadId?: string) {
   if (!bot.ownBrowser) return config.browserProfile;
-  const own = path.join(config.botBrowsersDir, bot.id);
-  if (!fs.existsSync(own)) {
-    fs.mkdirSync(own, { recursive: true });
-    if (fs.existsSync(config.browserProfile)) {
-      fs.cpSync(config.browserProfile, own, {
+  const copy = (from: string, to: string) => {
+    if (fs.existsSync(to)) return;
+    fs.mkdirSync(to, { recursive: true });
+    if (fs.existsSync(from)) {
+      fs.cpSync(from, to, {
         recursive: true,
         filter: (src) => !/(^|\/)(Singleton\w*|Cache|Code Cache|GPUCache|CacheStorage|ShaderCache|GrShaderCache|DawnCache)$/.test(src),
       });
     }
-  }
-  return own;
+  };
+  const own = path.join(config.botBrowsersDir, bot.id);
+  copy(config.browserProfile, own);
+  // A bot can work in a group and in its own chat at the same time; two Chromes can't share one profile,
+  // so its work in another chat gets a copy of its own profile (made once).
+  if (!threadId || threadId === bot.id) return own;
+  const lane = path.join(config.botBrowsersDir, `${bot.id}@${threadId.replace(/[^\w-]/g, "")}`);
+  copy(own, lane);
+  return lane;
 }
 
 /** Renames a bot and carries its memory file over (memory files are named after the bot). */
@@ -94,6 +105,9 @@ export function renameBot(bot: BotProfile, name: string) {
 
 export function deleteBot(bot: BotProfile) {
   fs.rmSync(path.join(config.botBrowsersDir, bot.id), { recursive: true, force: true }); // its own browser, if any
+  for (const dir of fs.existsSync(config.botBrowsersDir) ? fs.readdirSync(config.botBrowsersDir) : []) {
+    if (dir.startsWith(`${bot.id}@`)) fs.rmSync(path.join(config.botBrowsersDir, dir), { recursive: true, force: true }); // and its per-chat copies
+  }
   if (state.bots.length === 1) throw new Error("You can't delete your only bot.");
   state.bots = state.bots.filter((b) => b.id !== bot.id);
   for (const r of state.routines.filter((x) => x.botId === bot.id)) removeRoutine(r.id); // also stops their timers
@@ -161,6 +175,8 @@ Voice:
 • Have opinions when the evidence supports them ("Don't. The fee eats the gain."). Say "I don't know" plainly when you don't.
 • Dry humor, sparingly: at most one light line per reply. None when reporting a failure, a loss, health, legal trouble, or when the user is stressed.
 • When the choice is clearly yours to make, pick and name the trade-off in one line.
+• Talk while you work, like a person would. For anything that takes more than a few seconds, first say in one short line what you're doing ("On it: checking 3 airlines for the cheapest Friday flight."), then do it. If the user messages you mid-task, answer them in a line right away, then carry on. Between steps, only speak when it helps (a finding worth sharing early, a question); don't narrate every click.
+• Your final reply is the result, not a replay of the steps you already mentioned.
 • When a job is done, end with what you checked.
 Never: praise the question ("Great question"), corporate filler ("I'd be happy to assist", "Certainly!", "I apologize for any confusion"), stacked hedges, needless "as an AI" disclaimers, pretending to have feelings or a personal life, lectures, emoji.
 Spice ${SPICE[bot.spice ?? "medium"]} Spice never changes honesty, approvals or safety, and drops to low by itself when the user is upset, has lost money, or the topic is serious.
@@ -178,7 +194,7 @@ You run 24/7 on the user's own dedicated MacBook Pro, which is your computer. Th
 
 Your computer and tools:
 • Terminal (Bash), files, web search and fetch. Shared workspace: ${config.workspace}. Files the user sends arrive in ${config.inbox}.
-• A real Chrome browser (browser_* tools). Logins persist. Prefer the browser for sites with no API.
+• A real Chrome browser (browser_* tools). Logins persist. Prefer the browser for sites with no API. When you finish work in the browser, take one browser_take_screenshot of the end result (the confirmation, the filled form, the page you found): the user sees it as proof of what you did.
 • X (Twitter), read-only: search by opening https://x.com/search?q=<words>&f=live (newest) or &f=top in the browser and read the posts (author, time, text, link). If X asks to sign in, call request_takeover once. Never like, repost, reply, follow or post.
 • The Mac's own data, read directly (fast; prefer these to clicking through apps): calendar_events / calendar_add, reminders_list / reminders_add (syncs to the user's iPhone), contacts_find, mail_inbox (Mail.app, read-only), find_files (Spotlight).
 • Mac apps: mac_screenshot to see the screen, then mac_click / mac_type / mac_key / mac_scroll / mac_open_app to operate any app. Always take a fresh screenshot after acting to check the result.

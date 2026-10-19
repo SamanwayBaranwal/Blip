@@ -14,7 +14,17 @@ On the Mac that will run Blip (it should stay on and logged in):
 curl -fsSL https://raw.githubusercontent.com/SamanwayBaranwal/blip/main/install.sh | zsh
 ```
 
-It installs Blip in `~/Blip`, starts it, and prints a link for your phone. Then sign in to Claude Code once on that Mac. In the app, open **Settings → This Mac → Check Mac access** to allow Calendar, Reminders, Contacts and Mail. Running the same line again updates Blip.
+It installs Blip in `~/Blip` and starts it. Then:
+
+1. **Sign in to Claude Code once** on that Mac (Blip uses your Claude plan).
+2. **Open Blip on the Mac.** At the top it says *Put Blip on your phone, from anywhere*. Tap **Set up**:
+   - **Turn on your link.** Tap *Quick link*. Nothing to sign up for.
+   - **Your email.** Type the email you read on your phone.
+   - **Blip's email.** Give Blip a mailbox to send from: make a new Gmail for it, turn on 2-step verification, [create an app password](https://myaccount.google.com/apppasswords), and paste both.
+   - **Email me the link.** Blip emails you the link and a one-tap sign-in link. Open it on your phone, tap the link, then *Share → Add to Home Screen*. Or scan the QR code on the Mac's screen with your phone's camera.
+3. In the app, open **Settings → This Mac → Check Mac access** to allow Calendar, Reminders, Contacts and Mail.
+
+That's it: your phone now reaches Blip from any network, even from another country. Running the install line again updates Blip.
 
 Want to add a skill, a tool or a connector? See [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -106,13 +116,18 @@ Right-click its Dock icon → **Options → Keep in Dock**.
 3. iPhone: tap **Share → Add to Home Screen**. Android: tap **Install app**.
 4. Open Blip from the Home Screen and type the 6-digit code. It works once and expires after 10 minutes.
 
-### Use it from anywhere, with notifications and the mic
+### Use it from anywhere (another network, another country)
 
-The home Wi-Fi link only works on the same network. Phones also only allow notifications and the mic over HTTPS.
+The home Wi-Fi link only works on the same network. Phones also only allow notifications and the mic over `https://`. **Settings → Use Blip anywhere** fixes both, with nothing to install on the phone:
 
-1. Install [Tailscale](https://tailscale.com/download) on the Mac and on your phone, and sign in to both with the same account.
-2. Run `./blip.sh remote`. **Settings → Connect your phone** then shows the private `https://` link, which only your own devices can open.
-3. Add it to the Home Screen from that link. Then in Blip, go to **Settings → Notifications → Turn on**.
+- **Quick link (no account).** Blip opens a secure Cloudflare tunnel to this Mac. The link changes when the Mac restarts; Blip then **emails you the new link** (with a one-tap sign-in) and pings your phone.
+- **Permanent link (Tailscale).** Install [Tailscale](https://tailscale.com/download/mac) on the Mac only and sign in once (Google, Apple or Microsoft). Choose *Permanent link*; the first time, Tailscale asks you to tap **Enable** in the browser. The link never changes.
+
+Either way, everything except the sign-in page stays locked behind your sign-in. Sign-in links in emails and QR codes work once and expire.
+
+After adding Blip to the Home Screen from the anywhere link, go to **Settings → Notifications → Turn on**.
+
+Prefer a private link only your own devices can open? Install Tailscale on the Mac and the phone and run `./blip.sh remote`.
 
 ### Control the Mac from your phone
 

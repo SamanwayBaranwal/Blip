@@ -213,6 +213,17 @@ export function addRoutine(botId: string, name: string, scheduleText: string, pr
   return { routine, next };
 }
 
+/** Puts back a routine that was just deleted (Undo). */
+export function restoreRoutine(r: Routine) {
+  if (state.routines.some((x) => x.id === r.id)) return r;
+  if (!state.bots.some((b) => b.id === r.botId)) throw new Error("Its bot no longer exists.");
+  state.routines.push(r);
+  save();
+  if (r.trigger) arm(r);
+  else schedule(r);
+  return r;
+}
+
 export function removeRoutine(id: string) {
   jobs.get(id)?.stop();
   jobs.delete(id);

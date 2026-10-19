@@ -313,6 +313,73 @@ The goal of this batch was that you never have to guess what Blip is doing.
 - **The double-check** runs with Read, Glob and Grep, without Bash: read-only runs refuse shell commands.
 - **Tests:** 50 unit tests and 25 golden tasks.
 
+## Feel, proof, control center, anywhere access (2026-10-19, late night)
+
+- **Proof of work:**
+  - `saveProof()` in `agent.ts`: images returned by `browser_take_screenshot` and the `mac_*` tools are saved to `workspace/proof` and added to `RunView.shots` (at most 8 per task, via `keepShots`).
+  - The persona asks for one final browser screenshot.
+  - Replays add 3 stills (`stills()` in `replay.ts`) when a task has no screenshots.
+  - The app shows up to 3 thumbnails ("What it did") and a swipeable `Lightbox` gallery (`ui.openImage(list, i)`).
+- **Identity:**
+  - Every bot after the first gets its own Blip color (`BOT_COLORS` in `bots.ts`).
+  - `botColor()` in `app.js` adds a colored dot to speaker names and run owners. The rest of the UI stays monochrome.
+- **Duplicate and templates:**
+  - `POST /api/bots/:id/duplicate` (`duplicateBot` copies job, style, look, model, personality and memory, with a new color).
+  - `POST /api/bots/:id/template` saves a bot to `data/templates/*.json`. `customTemplates()` adds keys `custom:<slug>` to `GET /templates`, and `DELETE /api/templates/:key` removes one.
+- **"@Name":** `mentionOf()` matches full names with spaces, longest first ("@Blip 2 …"), plus slugs ("@blip-2"). The old one-word regex sent "@Blip 2" to Blip.
+- **Rules:** "Always allow" is now per bot (`Rule.botId`, labeled "Always allow for X", removable in Settings → Rules). Ask-first rules stay global.
+- **Undo:**
+  - Deleting a routine returns it, and `POST /routines/restore` puts it back.
+  - A deleted skill moves to `data/skill-trash` (kept a day); `POST /skills/:name/undelete` restores it.
+  - A skill edit can be undone through its version history, but only when the text changed.
+  - `toast(text, { label, run })` shows the action button.
+- **Control center** (`ControlSheet`): needs-you, running, today per bot (`GET /api/today`, `todaySummary()`, from `state.runs` with `botId`), routines and skills.
+- **⌘K palette** (`Palette`): bots, groups, actions, skills and routines. Opened from the sidebar's Search on phones. The search box is focused in `useLayoutEffect`, so the first keystrokes aren't lost.
+- **Motion:**
+  - New messages slide in (`.m-wrap.enter`, only for messages that arrive while you watch); chats glide in on switch.
+  - Sheets animate out (`Sheet` waits 190 ms).
+  - Toasts spring in and out; tiles, chips and screenshots appear one after another; buttons press in.
+  - A finished task's Blip celebrates (state "done") for 2.6 s.
+  - The empty-chat Blip's eyes follow the pointer (`--lx/--ly`).
+  - Everything respects reduced motion. Touch screens get 40–44 px targets.
+- **Use Blip anywhere (`reach.ts`):**
+  - **Modes** (`settings.anywhere`):
+    - `cloudflare`: a quick tunnel (`cloudflared tunnel --url`, no account). The link changes when Blip restarts.
+    - `tailscale`: Funnel, a permanent `https://<mac>.<tailnet>.ts.net`. The first time, it surfaces Tailscale's "enable Funnel" link.
+    - `off`: the default. The owner turns it on in the setup sheet.
+  - **The link is announced only once it works through public DNS** (`publicLinkWorks` resolves via 1.1.1.1 / 8.8.8.8). A fresh trycloudflare name takes about a minute to resolve, and an early lookup gets cached as "not found". The health check (every 5 minutes, 3 strikes, then a new tunnel) uses the same lookup.
+  - **On a link change** (`onLinkChange`): Blip emails the owner (`sendLinkEmail`, from the agent mailbox) and pushes "Blip has a new link"; the service worker opens `data.url`.
+  - **One-time sign-in links:** `/login?t=` with `newLoginLink` / `useLoginLink`. Only a sha256 hash is stored in `state.loginLinks`. Emailed links last 7 days, QR codes 15 minutes, push links 1 day.
+  - **QR code:** `GET /api/reach/qr` (an SVG from `qrcode-terminal`'s generator).
+  - **First-run:** `SetupBanner` (on the Mac only, until `state.setupDone`) opens `AnywhereSheet`, which has 4 steps: link, your email, Blip's email, then email or QR.
+  - **Processes:** `blip.sh setup` installs cloudflared. Leftover tunnels for the port are killed on start; the child is killed on exit.
+  - **Tested over a real tunnel:** the public link answered and the API refused requests without sign-in. The email was sent with a one-tap link, a fresh browser signed in through it over the internet, a second use was refused, and a chat reply arrived over the tunnel. After Turn off the link returned 530.
+- **Tests:** 60 unit tests and 27 golden tasks.
+
+## Lanes, talking while working, forgiving tags, crew logo (2026-10-19, 2 a.m.)
+
+- **Lanes:** a task runs in a lane, meaning one bot in one chat (`laneOf(botId, threadId)` in `agent.ts`).
+  - `running`, the queue tickets, the warm `sessions` and the computer lock (`Run.botId` now holds the lane) are all keyed by lane.
+  - So a bot works in a group and answers in its own chat **at the same time** (tested: a 1.2 s reply while busy in a group).
+  - `stopCurrent(chatId)` stops everything in that chat. `stopBot(id)` (used when deleting a bot) stops the bot in every chat. `isRunning(botId)` means busy anywhere.
+  - App state: `bot.running` and `bot.queued` count only the bot's own chat, and `bot.elsewhere` lists other chats (the sidebar says "Working in X").
+  - Own-browser bots get a profile copy per chat (`browser-profiles/<id>@<chat>`), because two Chromes can't share one profile.
+  - **Bug fixed:** `--output-dir` had been swallowed by a code comment in the Playwright arguments.
+- **Talking while working:**
+  - Text a bot writes before a tool call is posted at once as a message (`onSay` → `meta.interim`). Lines less than 12 s apart are merged.
+  - Every chat message carries `TALK_FIRST` (a one-line "say what you're about to do first" instruction). The persona alone wasn't followed by Haiku or Sonnet; with the note on each message both comply.
+  - Mid-task messages are sent with "answer them in one short line right away".
+  - The final reply is the result, not a recap.
+- **Forgiving tags** (`guessMention` in `core.ts`):
+  - exact "@Name" (spaces allowed), typos ("@scot", edit distance 1–2 when one name is clearly closest), and "Name, …" or "Name: …" without an @
+  - a guessed name posts "Sent to X." in the chat
+  - an unknown "@name" goes to the lead, with instructions to work out who was meant
+  - an untagged message tells the lead to hand it to the teammate it's clearly for
+  - the chat shows exactly what you typed
+- **"@" suggestions in the composer:** members (or your other bots) appear as you type; Enter or a tap inserts "@Name ".
+- **Crew logo:** a group avatar is a rounded square with up to 3 member Blips in their colors, the lead in front, plus "+N" for more. Members working in the group bob one after another. The empty group chat shows it large.
+- **Tests:** 61 unit tests and 29 golden tasks.
+
 ## How the code fits together
 
 - `hub.ts` is the single source of truth for conversations. Message kinds are `text`, `run` (live progress) and `card`.

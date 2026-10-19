@@ -68,6 +68,8 @@ export type RunContext = {
   onWait?: (holderName: string | null) => void;
   /** Set once this engine has used the browser or screen (its Chrome may still be open). */
   usedComputer?: boolean;
+  /** This engine's lane (bot + chat): whose Chrome is open, for the computer lock. */
+  lane?: string;
   /** The chat this task runs in: the bot's own, or a group. Cards go there. */
   threadId?: string;
   /** Working for another bot (hand_off): its own browser, and the screen and mouse stay with the lead. */
@@ -166,9 +168,10 @@ function taskKey(toolName: string, input: Record<string, unknown>) {
 const toolMatches = (pattern: string, toolName: string) =>
   pattern === "*" || pattern === toolName || (pattern.endsWith("*") && toolName.startsWith(pattern.slice(0, -1)));
 
-function matchingRule(effect: Rule["effect"], toolName: string, input: Record<string, unknown>, summary: string) {
+function matchingRule(effect: Rule["effect"], toolName: string, input: Record<string, unknown>, summary: string, botId?: string) {
   return state.rules.find((r) => {
     if (r.effect !== effect || !toolMatches(r.tool, toolName)) return false;
+    if (r.botId && r.botId !== botId) return false; // "Always allow" saved for another bot
     if (!r.match) return true;
     if (effect === "ask") return `${summary}\n${JSON.stringify(input)}`.toLowerCase().includes(r.match.toLowerCase());
     const arg = mainArg(toolName, input);
@@ -179,11 +182,12 @@ function matchingRule(effect: Rule["effect"], toolName: string, input: Record<st
 
 export function describeRule(r: Rule) {
   const tool = r.tool.replace(/^mcp__browser__browser_/, "browser ").replace(/^mcp__/, "");
-  return r.effect === "ask" ? `Ask first: ${r.tool === "*" ? "anything" : tool}${r.match ? ` containing "${r.match}"` : ""}` : `Allow automatically: ${tool}${r.match ? ` "${r.match.trim()}…"` : ""}`;
+  const who = r.botId ? ` (${state.bots.find((b) => b.id === r.botId)?.name ?? "a deleted bot"} only)` : "";
+  return r.effect === "ask" ? `Ask first: ${r.tool === "*" ? "anything" : tool}${r.match ? ` containing "${r.match}"` : ""}` : `Allow automatically: ${tool}${r.match ? ` "${r.match.trim()}…"` : ""}${who}`;
 }
 
 export function addRule(rule: Omit<Rule, "id">) {
-  const exists = state.rules.some((r) => r.effect === rule.effect && r.tool === rule.tool && r.match === rule.match);
+  const exists = state.rules.some((r) => r.effect === rule.effect && r.tool === rule.tool && r.match === rule.match && r.botId === rule.botId);
   if (!exists) {
     state.rules.push({ id: randomUUID().slice(0, 6), ...rule });
     save();
@@ -346,7 +350,7 @@ async function takeComputer(ctx: RunContext, toolName: string, decision: Permiss
   if (decision.behavior !== "allow" || !usesComputer(toolName, ctx.handoff ? { ...ctx.bot, ownBrowser: true } : ctx.bot)) return decision;
   let waited = false;
   try {
-    await acquireComputer({ runId: ctx.runId, botId: ctx.bot.id, botName: ctx.bot.name }, signal, (who) => {
+    await acquireComputer({ runId: ctx.runId, botId: ctx.lane ?? ctx.bot.id, botName: ctx.bot.name }, signal, (who) => {
       waited = true;
       ctx.onWait?.(who);
     });
@@ -463,7 +467,7 @@ function decider(ctx: RunContext): Decide {
       if (target && READ_TOOLS.has(toolName)) return allow("auto");
       if (target && WRITE_TOOLS.has(toolName) && inside(target, config.workspace)) return allow("auto");
       if (key && ctx.taskAllows.has(key)) return allow("allowed for this task");
-      if (matchingRule("allow", toolName, input, summary)) return allow("your rule");
+      if (matchingRule("allow", toolName, input, summary, ctx.bot.id)) return allow("your rule");
     }
 
     // 5. Auto Review decides between running it, asking you, or flagging it as dangerous.
@@ -483,7 +487,7 @@ function decider(ctx: RunContext): Decide {
     const rule = risky || askFirst ? undefined : proposedAllowRule(toolName, input);
     const buttons: CardButton[] = [{ label: "Allow once", value: "once", style: "primary" }];
     if (!risky && !askFirst && key) buttons.push({ label: "Allow for this task", value: "task" });
-    if (rule) buttons.push({ label: "Always allow", value: "always" });
+    if (rule) buttons.push({ label: `Always allow for ${ctx.bot.name}`, value: "always" }); // one bot only; remove it in Settings → Rules
     buttons.push({ label: "Deny", value: "deny", style: "danger" });
     const [title, ...detail] = summary.split("\n");
     const { value: choice } = await askCard({
@@ -503,7 +507,7 @@ function decider(ctx: RunContext): Decide {
     });
     if (choice === "deny") return deny("The user denied this action from their phone. Don't retry it; ask them what to do instead.");
     if (choice === "task" && key) ctx.taskAllows.add(key);
-    if (choice === "always" && rule) addRule(rule);
+    if (choice === "always" && rule) addRule({ ...rule, botId: ctx.bot.id });
     return allow({ always: "always (rule saved)", task: "allowed for this task" }[choice] ?? "allowed once");
   };
 }

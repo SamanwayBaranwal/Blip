@@ -22,6 +22,23 @@ export function replaySetup(key: string) {
   return { videoDir, configFile };
 }
 
+/** Three stills from a clip (start, middle, end), saved as proof screenshots. */
+async function stills(ff: string, clip: string): Promise<string[]> {
+  const probe = await run(ff, ["-hide_banner", "-i", clip], { timeout: 20_000 }).catch((e: { stderr?: string }) => ({ stderr: e.stderr ?? "" }));
+  const m = /Duration: (\d+):(\d+):([\d.]+)/.exec(probe.stderr ?? "");
+  const seconds = m ? Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]) : 0;
+  if (seconds < 1) return [];
+  const dir = path.join(config.workspace, "proof");
+  fs.mkdirSync(dir, { recursive: true });
+  const files: string[] = [];
+  for (const [i, at] of [0.08, 0.5, 0.97].entries()) {
+    const file = path.join(dir, `${path.basename(clip, ".mp4")}-${i}.jpg`);
+    await run(ff, ["-hide_banner", "-loglevel", "error", "-ss", (seconds * at).toFixed(2), "-i", clip, "-frames:v", "1", "-q:v", "4", "-y", file], { timeout: 30_000 });
+    if (fs.existsSync(file)) files.push(path.relative(config.workspace, file));
+  }
+  return files;
+}
+
 /** After a browser session ends: turn its recordings into one clip (2× speed) and link it from those tasks. */
 export async function finishReplay(videoDir: string, configFile: string, targets: { botId: string; msgId: string }[]) {
   try {
@@ -39,7 +56,13 @@ export async function finishReplay(videoDir: string, configFile: string, targets
     const concat = `${join};${videos.map((_, i) => `[v${i}]`).join("")}concat=n=${videos.length}:v=1:a=0[out]`;
     await run(ff, ["-hide_banner", "-loglevel", "error", ...inputs, "-filter_complex", concat, "-map", "[out]", "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "31", "-movflags", "+faststart", "-y", out], { timeout: 10 * 60_000 });
     const rel = path.relative(config.workspace, out);
-    for (const t of targets) updateMessage(t.botId, t.msgId, (m) => m.run && (m.run.replay = rel));
+    const frames = await stills(ff, out).catch(() => [] as string[]);
+    for (const t of targets)
+      updateMessage(t.botId, t.msgId, (m) => {
+        if (!m.run) return;
+        m.run.replay = rel;
+        if (!m.run.shots?.length && frames.length) m.run.shots = frames; // a few stills, so there's something to glance at
+      });
   } catch (error) {
     console.error("Couldn't make the replay:", (error as Error).message.split("\n")[0]);
   } finally {
