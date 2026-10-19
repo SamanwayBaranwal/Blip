@@ -282,6 +282,37 @@ Fixed after a full audit. Keep these invariants:
   - Real IMAP/SMTP is untested until the user connects a mailbox.
 - **Tests:** 43 unit tests and 21 golden tasks.
 
+## Clarity layer (2026-10-19, night)
+
+The goal of this batch was that you never have to guess what Blip is doing.
+
+- **Status line** (`StatusLine` in `app.js`): always under the input. It shows Listening, Thinking…, "Working · <step>", "Running routine · X", "Checking in · read-only", "Waiting for the computer", "Waiting for your approval" (with Show) or Speaking (with Stop), plus a timer. When idle it reads "Type / for skills and commands".
+  - It gets the task type from `runtime().running[].kind` (chat, routine, check-in, handoff, background) and `threadId`.
+  - `store.speaking` is set by `speakText`.
+- **Activity strip** (`ActivityStrip`): one thin line under the top bar covering every bot.
+  - It shows what's running, what needs you (`runtime.pending`, from `pendingList()` in `cards.ts`), what's queued, the next routine (`appState.nextRoutine`) and the last check-in (`state.lastProactiveAt`).
+  - Tap it for details; each row opens its chat, and there's a Check now button.
+- **Tray** (`SuggestionTray`): pending suggestion cards and `check` cards sit at the top of the chat, with one primary button and × (the non-primary button). The timeline hides them until they're answered.
+- **Failed double-checks** are a `check` card ("Ask X to fix it" starts the task "Fix after double-check"). They're non-blocking, like suggestions: `pendingCards` ignores both.
+  - Test hook: with `BLIP_FAKE_VERDICT=1`, a request containing FAILCHECK always fails the check.
+- **Results** (`RunView.results`, `resultOf()` in `agent.ts`, from the PostToolUse hook): chips on the task for Write (workspace files, except memory, browser, screenshots, replays, inbox and .claude), `calendar_add`, `reminders_add`, `save_skill`, `add_routine` and `add_event_routine`.
+  - The app toasts each new result, and toasts "Checked: …" lines, shortened to 90 characters (`confirmQuietly`).
+  - Files made with Bash redirects don't produce a chip.
+- **Schedules in words:** `describeSchedule()` in `routines.ts` ("Weekdays at 8:00 AM").
+  - Routines show their last run (`lastRunOf`; `RunRecord.routineId`, with test runs via `TaskOpts.testOf`).
+  - Skills show their version and last use (`state.skillUse`, `noteSkillUse` from the Skill tool or a Read of SKILL.md, counted once a minute).
+- **"/" menu:** commands (new, stop, talk, remote, skills, teach, routines, checkin) and saved skills. On the server, `skillCommand()` turns "/name details" into "Use the "name" skill now…" (the chat still shows what you typed).
+- **Talk mode visual** (`TalkOrb`): the bars follow the mic level while listening, pulse while thinking, wave while speaking, and turn amber at "Needs your OK".
+- **Empty chat:** `StarterTiles` (a scrolling row on phones, a grid on desktop), with separate tiles for groups. `ui.openSheet` / `ui.select` / `ui.setControl` are set by Shell for components outside it.
+- **Notification buttons:**
+  - `askCard({ pushActions })` puts up to 2 buttons on the push notification; `sw.js` answers through `POST /api/card/:id`, and on failure opens the app.
+  - Approvals get "Allow once" and "Deny", except risky ones (send, pay, delete, Ask-first rules, secrets), which only get Deny.
+  - Suggestions get "Do it", and failed checks get "Fix it".
+  - iPhone shows no buttons, only the text.
+- **Auto Review bug fixed:** `z.toJSONSchema` adds `$schema: draft 2020-12`, which the engine rejects. Every review had been failing and falling back to asking. `review.ts` now strips it. Covered by a unit test and a golden test.
+- **The double-check** runs with Read, Glob and Grep, without Bash: read-only runs refuse shell commands.
+- **Tests:** 50 unit tests and 25 golden tasks.
+
 ## How the code fits together
 
 - `hub.ts` is the single source of truth for conversations. Message kinds are `text`, `run` (live progress) and `card`.

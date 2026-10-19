@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { slug } from "./bots.js";
 import { config, ROOT } from "./config.js";
+import { save, state } from "./store.js";
 
 // Skills are folders with a SKILL.md (a short header, then the steps). Every save keeps the previous version,
 // skills can be exported and imported as a single .md file, and a library of examples ships with Blip.
@@ -97,4 +98,19 @@ export function addFromLibrary(name: string) {
   const clean = cleanSkill(fs.readFileSync(file, "utf8"), name);
   writeSkill(clean.name, clean.text);
   return clean.name;
+}
+
+/** Remembers when a skill was last used (shown in Skills). Several uses in one minute count once. */
+export function noteSkillUse(name: string) {
+  if (!name || !/^[\w-][\w.-]*$/.test(name) || !fs.existsSync(skillPath(name))) return;
+  const use = (state.skillUse ??= {});
+  const prev = use[name];
+  if (prev && Date.now() - Date.parse(prev.at) < 60_000) return;
+  use[name] = { at: new Date().toISOString(), count: (prev?.count ?? 0) + 1 };
+  save();
+}
+
+/** The saved skills with what the Skills screen shows about each: version number and last use. */
+export function skillsOverview(list: { name: string; description: string }[]) {
+  return list.map((s) => ({ ...s, version: skillVersions(s.name).length + 1, lastUsed: state.skillUse?.[s.name]?.at ?? null, uses: state.skillUse?.[s.name]?.count ?? 0 }));
 }

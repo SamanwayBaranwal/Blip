@@ -18,7 +18,7 @@ const port = 8790 + Math.floor(Math.random() * 9);
 fs.writeFileSync(path.join(home, ".env"), `WEB_PORT=${port}\nMODEL=claude-haiku-5-5\nFAST_MODEL=claude-haiku-5-5\nREVIEW_MODEL=claude-haiku-5-5\nEFFORT=low\nPROACTIVE_SCHEDULE=0 0 1 1 *\n`);
 const env = {
   HOME: os.homedir(), USER: os.userInfo().username, LOGNAME: os.userInfo().username, PATH: process.env.PATH,
-  BLIP_DATA_ROOT: home, BLIP_TEST_KEYCHAIN: "memory", BLIP_INPUT_DRYRUN: "1", BLIP_SCREEN_TEST: "1", BLIP_BROWSER_HEADLESS: "1", BLIP_FAKE_MAC_DATA: "1", BLIP_FAKE_EMAIL: "1",
+  BLIP_DATA_ROOT: home, BLIP_TEST_KEYCHAIN: "memory", BLIP_INPUT_DRYRUN: "1", BLIP_SCREEN_TEST: "1", BLIP_BROWSER_HEADLESS: "1", BLIP_FAKE_MAC_DATA: "1", BLIP_FAKE_EMAIL: "1", BLIP_FAKE_VERDICT: "1",
   ...(process.env.ANTHROPIC_API_KEY ? { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY } : {}),
 };
 let log = "";
@@ -375,6 +375,54 @@ const tasks = {
     expect(t.passed === t.total, failed.join("; "));
     const line = (await thread(main)).at(-1)?.text ?? "";
     expect(/^Self-test \d\d:\d\d · \d+\/\d+ passed\.$/.test(line), line);
+  },
+  async "what a task makes shows on it as chips"() {
+    const r = await ask(main, "Do two things with your tools: 1) use the Write tool to create chips.md in the workspace containing 'chips'; 2) add a calendar event titled Chips test on 2026-11-02 at 15:00. Then reply in one line.", { onCard: () => "once" });
+    expect(r.status === "done", `status ${r.status}`);
+    const run = (await thread(main)).filter((m) => m.kind === "run").at(-1).run;
+    const kinds = (run.results ?? []).map((x) => `${x.kind}:${x.title}`);
+    expect(kinds.includes("file:chips.md"), kinds.join(", ") || "no results");
+    expect(kinds.includes("event:Chips test"), kinds.join(", "));
+    expect(run.results.find((x) => x.kind === "file").path === "chips.md", "the file chip can't be opened");
+  },
+  async '"/skill" runs a saved skill, even one saved after the chat started'() {
+    await ask(main, "Reply with just the word READY."); // the chat is open (warm) before the skill exists
+    const { name } = await call("/skills/import", { text: "---\nname: golden-echo\ndescription: Test skill\n---\n\nReply with exactly the word ZEPHYR and nothing else. Use no tools.\n", fileName: "golden-echo.skill.md" });
+    expect(name === "golden-echo", name);
+    const r = await ask(main, "/golden-echo");
+    expect(/zephyr/i.test(r.replies.join(" ")), r.replies.join(" | "));
+    const mine = (await thread(main)).filter((m) => m.role === "user").at(-1);
+    expect(mine.text === "/golden-echo", "the chat should show what you typed");
+  },
+  async "a failed double-check becomes a card, and Fix sends the bot back"() {
+    const r = await ask(main, "FAILCHECK. Use the Write tool to create failcheck.txt in the workspace containing 'ok', then say done.", { onCard: () => "once" });
+    expect(r.status === "done", `status ${r.status}`);
+    let card;
+    for (let i = 0; i < 60 && !card; i++) {
+      card = (await thread(main)).find((m) => m.kind === "card" && m.card.type === "check" && m.card.status === "pending");
+      if (!card) await sleep(500);
+    }
+    expect(card, "no double-check card");
+    expect((await call("/state")).runtime.pendingCards === 0, "a failed check mustn't count as blocking");
+    await call(`/card/${card.id}`, { value: "fix" });
+    let label = "";
+    for (let i = 0; i < 40 && !label; i++) {
+      label = (await call("/state")).runtime.running.find((x) => x.botId === main)?.label ?? "";
+      if (!label) await sleep(250);
+    }
+    expect(label === "Fix after double-check", `fix task didn't start (${label})`);
+    await call("/stop", { botId: main });
+  },
+  async "Auto Review lets a safe workspace write through without asking"() {
+    await call("/settings", { autoReview: true }, "PATCH");
+    try {
+      const file = path.join(home, "workspace", "reviewed.txt");
+      const r = await ask(main, `Run this exact shell command: echo reviewed > "${file}"`, { onCard: () => "deny" });
+      expect(r.cards.filter((c) => c.type === "approval").length === 0, `asked anyway: ${r.cards.map((c) => c.note).join(" | ")}`);
+      expect(fs.existsSync(file), "the command didn't run");
+    } finally {
+      await call("/settings", { autoReview: false }, "PATCH");
+    }
   },
 };
 

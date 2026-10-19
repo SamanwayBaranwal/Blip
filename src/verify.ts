@@ -22,6 +22,8 @@ export const isCheckable = (tools: string[]) => tools.some((t) => CHECKABLE.incl
 export type Verdict = { verdict: "verified" | "not verified" | "can't check"; reason: string };
 
 export async function verifyTask(bot: BotProfile, request: string, reply: string, steps: string[], model: string): Promise<Verdict> {
+  // Tests only: a request containing FAILCHECK gets a failed check, so the card can be tested end to end.
+  if (process.env.BLIP_FAKE_VERDICT === "1" && /\bFAILCHECK\b/.test(request)) return { verdict: "not verified", reason: "the test asked for a failed check (todo.txt is missing)" };
   const abort = new AbortController();
   const timer = setTimeout(() => abort.abort(), 150_000);
   const ctx = { bot, request, readOnly: true, taskAllows: new Set<string>(), runId: `verify-${Date.now()}` };
@@ -45,7 +47,7 @@ CAN'T CHECK: <why>`,
         maxTurns: 10,
         cwd: config.workspace,
         settingSources: [],
-        tools: ["Read", "Glob", "Bash"],
+        tools: ["Read", "Glob", "Grep"], // no shell: read-only runs can't use it (calendar, routines and skills come from Blip's tools)
         systemPrompt: "You are an independent checker. You verify claims with read-only tools and report in one line. You never modify anything.",
         mcpServers: { blip: createBlipServer(bot, { background: true }) },
         canUseTool: makeCanUseTool(ctx), // read-only: anything that would change something is refused

@@ -1,6 +1,6 @@
 // Service worker: makes the app installable, keeps it opening when the Mac is unreachable (so it can say
 // "offline since …" instead of a blank page), and shows push notifications.
-const SHELL = "blip-shell-v1";
+const SHELL = "blip-shell-v2";
 self.addEventListener("install", (event) => {
   self.skipWaiting();
   event.waitUntil(caches.open(SHELL).then((c) => c.addAll(["/", "/app.js", "/styles.css", "/vendor/preact.mjs", "/vendor/hooks.mjs", "/vendor/htm.mjs"]).catch(() => {})));
@@ -40,22 +40,48 @@ self.addEventListener("push", (event) => {
       silent: !!data.silent,
       icon: "/icon-512.png",
       badge: "/icon-512.png",
-      data: { botId: data.botId },
+      // Quick answers on the notification itself (Android, and Chrome on desktop; iPhone shows just the text).
+      actions: data.card ? data.card.actions : [],
+      requireInteraction: !!data.card,
+      data: { botId: data.botId, cardId: data.card && data.card.id },
     }),
   );
 });
 
+/** Answers a card from a notification button. If it can't (expired, signed out, offline), opens the app instead. */
+async function answerFromNotification(cardId, value, botId, title) {
+  try {
+    const res = await fetch(`/api/card/${encodeURIComponent(cardId)}`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ value }),
+    });
+    if (!res.ok) throw new Error(String(res.status));
+    await self.registration.showNotification("Blip", { body: `Done: ${title}`, tag: `answered-${cardId}`, silent: true, icon: "/icon-512.png", data: { botId } });
+    setTimeout(() => self.registration.getNotifications({ tag: `answered-${cardId}` }).then((list) => list.forEach((n) => n.close())), 4000);
+  } catch {
+    await openApp(botId);
+  }
+}
+
+function openApp(botId) {
+  const url = botId ? `/?bot=${encodeURIComponent(botId)}` : "/";
+  return self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windows) => {
+    for (const w of windows) {
+      w.postMessage({ type: "open-bot", botId });
+      return w.focus();
+    }
+    return self.clients.openWindow(url);
+  });
+}
+
 self.addEventListener("notificationclick", (event) => {
   event.notification.close();
-  const botId = event.notification.data && event.notification.data.botId;
-  const url = botId ? `/?bot=${encodeURIComponent(botId)}` : "/";
-  event.waitUntil(
-    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((windows) => {
-      for (const w of windows) {
-        w.postMessage({ type: "open-bot", botId });
-        return w.focus();
-      }
-      return self.clients.openWindow(url);
-    }),
-  );
+  const data = event.notification.data || {};
+  if (event.action && data.cardId) {
+    const label = ((event.notification.actions || []).find((a) => a.action === event.action) || {}).title || event.action;
+    return event.waitUntil(answerFromNotification(data.cardId, event.action, data.botId, label));
+  }
+  event.waitUntil(openApp(data.botId));
 });

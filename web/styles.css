@@ -324,7 +324,7 @@ textarea.input { height: auto; padding: 10px 13px; }
 .offline-screen h1 { font-size: 22px; font-weight: 600; letter-spacing: -0.02em; margin: 10px 0 0; text-wrap: balance; }
 .offline-screen p { color: var(--text-2); margin: 0; max-width: 34ch; }
 .offline-screen ul { text-align: left; margin: 10px 0 0; padding-left: 18px; display: grid; gap: 4px; }
-.toast { position: fixed; left: 50%; bottom: calc(100px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 18px; border-radius: 999px; font-size: 13.5px; font-weight: 500; z-index: 90; animation: rise 0.2s; max-width: calc(100% - 32px); }
+.toast { position: fixed; left: 50%; bottom: calc(100px + env(safe-area-inset-bottom)); transform: translateX(-50%); background: var(--text); color: var(--bg); padding: 10px 18px; border-radius: 18px; font-size: 13.5px; font-weight: 500; z-index: 90; animation: rise 0.2s; width: max-content; max-width: min(520px, calc(100% - 32px)); text-align: center; line-height: 1.4; }
 .badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--warn); color: #000; font-size: 11px; font-weight: 600; display: inline-grid; place-items: center; }
 .badge.neutral { background: var(--text); color: var(--bg); }
 
@@ -486,3 +486,114 @@ textarea.input { height: auto; padding: 10px 13px; }
 
 .email-form { display: grid; grid-template-columns: 1fr 1fr auto; gap: 8px; align-items: center; }
 @media (max-width: 560px) { .email-form { grid-template-columns: 1fr; } }
+
+/* ---------- clarity: status line, strip, tray, results, tiles, talk, "/" menu ---------- */
+.s-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3); flex: none; }
+.s-dot.live { background: var(--text); animation: breathe 1.4s ease-in-out infinite; }
+.s-dot.wait { background: var(--warn); }
+.status-time { font: 12px var(--mono); color: var(--text-3); flex: none; font-variant-numeric: tabular-nums; }
+
+/* What the bot is doing, always under the input. */
+.status-line { max-width: 740px; margin: 7px auto 0; min-height: 18px; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 12.5px; color: var(--text-3); }
+.status-line .s-text { color: var(--text-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.status-line.wait .s-text { color: var(--warn); }
+.status-line.rec .s-dot { background: var(--danger); animation: breathe 1s ease-in-out infinite; }
+.status-line.live .s-dot { background: var(--text); animation: breathe 1.4s ease-in-out infinite; }
+.status-line.wait .s-dot { background: var(--warn); }
+.status-line .s-idle { opacity: 0.7; }
+.status-act { font-size: 12.5px; color: var(--text); text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--line-strong); padding: 2px 4px; flex: none; }
+
+/* The strip under the top bar: everything going on, across all bots. */
+.strip { border-bottom: 1px solid var(--line); background: var(--bg); }
+.strip-line { display: flex; align-items: center; gap: 9px; width: 100%; max-width: 780px; margin: 0 auto; padding: 7px 20px; font-size: 12.5px; color: var(--text-3); text-align: left; }
+.strip-line:hover { color: var(--text-2); }
+.strip-parts { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.strip-parts > span { color: var(--text-2); }
+.strip-parts b.warn { color: var(--warn); font-weight: 500; }
+.strip-parts i { font-style: normal; margin: 0 7px; color: var(--text-3); }
+.strip .chev { display: grid; place-items: center; transition: transform 0.15s; }
+.strip .chev svg { width: 13px; height: 13px; }
+.strip .chev.open { transform: rotate(90deg); }
+.strip-body { max-width: 780px; margin: 0 auto; padding: 2px 12px 12px; display: grid; gap: 2px; animation: rise 0.18s ease-out; max-height: 55vh; overflow-y: auto; }
+.strip-title { font-size: 11.5px; font-weight: 500; color: var(--text-3); padding: 10px 8px 4px; letter-spacing: 0.02em; }
+.strip-row { display: flex; align-items: center; gap: 11px; padding: 8px; border-radius: 10px; text-align: left; width: 100%; min-width: 0; color: var(--text-2); }
+.strip-row:not(.static):hover { background: var(--hover); }
+.strip-row .grow { flex: 1; min-width: 0; }
+.strip-row .grow b { display: block; font-size: 13.5px; font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.strip-row .grow span { display: block; font-size: 12px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.strip-row > svg { width: 14px; height: 14px; color: var(--text-3); flex: none; }
+.r-icon { width: 28px; height: 28px; border-radius: 8px; background: var(--surface-2); display: grid; place-items: center; flex: none; color: var(--text-2); }
+.r-icon svg { width: 15px; height: 15px; }
+
+/* Suggestions and failed checks wait at the top of the chat. */
+.tray { max-width: 740px; width: calc(100% - 32px); margin: 10px auto 0; display: grid; gap: 6px; }
+.tray-item { display: flex; align-items: center; gap: 8px; padding: 8px 8px 8px 14px; border-radius: 14px; border: 1px solid var(--line-strong); background: var(--bg-elev); animation: rise 0.25s ease-out; min-width: 0; }
+.tray-item.check { border-color: color-mix(in srgb, var(--danger) 45%, transparent); }
+.tray-text { flex: 1; min-width: 0; text-align: left; display: grid; gap: 1px; padding: 2px 0; }
+.tray-text b { font-size: 14px; font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tray-text[aria-expanded="true"] b { white-space: normal; }
+.tray-kicker { display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--text-3); }
+.tray-kicker .k-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--text-2); }
+.tray-item.check .k-dot { background: var(--danger); }
+.tray-body { font-size: 13px; color: var(--text-2); margin-top: 4px; white-space: pre-wrap; }
+.tray-item .btn { flex: none; }
+.tray-item .icon-btn { width: 30px; height: 30px; }
+.tray-item .icon-btn svg { width: 15px; height: 15px; }
+.tray-more { justify-self: center; font-size: 12px; color: var(--text-3); padding: 2px 8px; }
+.tray-more:hover { color: var(--text); }
+.card.check .k-dot { background: var(--danger); }
+
+/* What a task made, right on the task. */
+.results { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 2px 42px; }
+.result { display: inline-flex; align-items: center; gap: 9px; padding: 6px 12px 6px 6px; border-radius: 12px; border: 1px solid var(--line-strong); background: var(--bg-elev); color: var(--text); text-decoration: none; text-align: left; max-width: 100%; min-width: 0; animation: pop 0.2s ease-out; }
+a.result:hover, button.result:hover { background: var(--hover); }
+.result .r-icon { width: 26px; height: 26px; }
+.r-text { display: grid; min-width: 0; }
+.r-text b { font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.r-text span { font-size: 11.5px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row-meta { margin-top: 3px; display: flex !important; align-items: center; gap: 5px; font-size: 12px !important; color: var(--text-3); }
+.row-meta.bad { color: var(--danger) !important; }
+.row-meta .state-dot, .row-meta .state-dot svg { width: 12px; height: 12px; }
+
+/* First steps in an empty chat. */
+.tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; max-width: 740px; width: calc(100% - 40px); margin: 0 auto 10px; }
+.tile { display: grid; gap: 2px; align-content: start; text-align: left; padding: 12px 14px; border-radius: 14px; border: 1px solid var(--line-strong); background: var(--bg-elev); transition: background 0.12s, border-color 0.12s; min-width: 0; }
+.tile:hover { background: var(--hover); border-color: color-mix(in srgb, var(--text) 22%, transparent); }
+.tile-icon { color: var(--text-2); margin-bottom: 6px; display: block; }
+.tile-icon svg { width: 17px; height: 17px; }
+.tile b { font-size: 13.5px; font-weight: 500; color: var(--text); }
+.tile span:last-child { font-size: 12px; color: var(--text-3); }
+@media (max-width: 640px) {
+  .tiles { display: flex; overflow-x: auto; scroll-snap-type: x mandatory; width: 100%; padding: 0 16px; scrollbar-width: none; }
+  .tiles::-webkit-scrollbar { display: none; }
+  .tile { flex: 0 0 auto; max-width: 220px; scroll-snap-align: start; padding: 10px 14px 10px 12px; grid-template-columns: auto 1fr; column-gap: 10px; align-items: center; }
+  .tile .tile-icon { grid-row: span 2; margin: 0; }
+  .tile b, .tile span:last-child { white-space: nowrap; }
+}
+/* The "/" menu takes the tiles' place while it's open. */
+.main:has(.slash-menu) .tiles { display: none; }
+
+/* Talk mode: a voice you can see. */
+.talk-orb { --lvl: 0; max-width: 740px; margin: 0 auto 10px; display: flex; align-items: center; gap: 14px; padding: 10px 12px 10px 10px; border-radius: 22px; border: 1px solid var(--line-strong); background: var(--surface); animation: rise 0.22s ease-out; }
+.talk-orb .orb { width: 52px; height: 52px; border-radius: 50%; flex: none; display: flex; align-items: center; justify-content: center; gap: 3px; background: var(--surface-2); box-shadow: 0 0 0 calc(var(--lvl) * 9px) color-mix(in srgb, var(--text) 9%, transparent); transition: box-shadow 0.08s linear; }
+.talk-orb .orb i { width: 3.5px; border-radius: 3px; background: var(--text); height: calc(5px + var(--lvl) * var(--k) * 26px); transition: height 0.08s linear; }
+.talk-orb.thinking .orb i { height: 5px; animation: t-dots 1.2s ease-in-out infinite; animation-delay: calc(var(--i) * 0.12s); }
+.talk-orb.speaking .orb i { animation: t-wave 0.9s ease-in-out infinite; animation-delay: calc(var(--i) * -0.18s); }
+.talk-orb.needs .orb i { background: var(--warn); height: 5px; }
+.talk-text { flex: 1; min-width: 0; display: grid; gap: 1px; }
+.talk-text b { font-size: 15px; font-weight: 600; letter-spacing: -0.01em; }
+.talk-text span { font-size: 12.5px; color: var(--text-3); }
+.talk-orb.needs .talk-text b { color: var(--warn); }
+@keyframes t-dots { 0%, 100% { opacity: 0.3; transform: translateY(0); } 50% { opacity: 1; transform: translateY(-3px); } }
+@keyframes t-wave { 0%, 100% { height: 6px; } 50% { height: calc(8px + var(--k) * 18px); } }
+
+/* The "/" menu. */
+.slash-menu { max-width: 740px; margin: 0 auto 8px; border: 1px solid var(--line-strong); background: var(--surface); border-radius: 16px; padding: 6px; display: grid; gap: 1px; box-shadow: var(--shadow); animation: rise 0.15s ease-out; }
+.slash-item { display: flex; align-items: center; gap: 12px; padding: 8px 10px; border-radius: 10px; text-align: left; min-width: 0; }
+.slash-item.on { background: var(--hover); }
+.slash-cmd { font: 500 13px var(--mono); color: var(--text); flex: none; }
+.slash-label { flex: 1; min-width: 0; font-size: 13px; color: var(--text-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.slash-kind { font-size: 11px; color: var(--text-3); border: 1px solid var(--line-strong); border-radius: 999px; padding: 1px 7px; flex: none; }
+@media (prefers-reduced-motion: reduce) {
+  .talk-orb .orb i, .s-dot.live, .status-line .s-dot { animation: none !important; }
+}

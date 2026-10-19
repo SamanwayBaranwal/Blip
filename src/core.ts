@@ -2,8 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { startAgent, type AgentHandle } from "./agent.js";
 import { activeBot, appendMemory, createBot, deleteBot, findBot, getBot, listSkills, memoryFile, primaryBot, slug } from "./bots.js";
-import { askCard, pendingCards } from "./cards.js";
+import { askCard, pendingCards, pendingList } from "./cards.js";
 import { similarRequests } from "./memory.js";
+import { skillPath } from "./skills.js";
 import { doubleCheck, isCheckable } from "./verify.js";
 import { calendarEvents, recentMail, withoutPrompts } from "./macdata.js";
 import { computerHolder, releaseComputer } from "./computer.js";
@@ -24,12 +25,14 @@ type Content = Parameters<typeof startAgent>[0]["prompt"];
 type Running = {
   label: string; bot: BotProfile; abort: AbortController; chat: boolean; handle?: AgentHandle; step: string; startedAt: number; model: string;
   routineId?: string;
+  kind: "chat" | "routine" | "check-in" | "handoff" | "background"; // what sort of task (the app's status line says it)
   threadId: string; // the chat it runs in: the bot's own, or a group
   teamWaits: number; // hand-offs it's waiting on (that time doesn't count toward its limit)
 };
 type Ticket = { botId: string; label: string; routineId?: string; handoff?: boolean; start: () => Promise<void> };
 export type TaskOpts = {
   label: string; chat: boolean; readOnly?: boolean; quiet?: boolean; voice?: boolean; header?: string; routineId?: string; noPush?: boolean;
+  testOf?: string; // a test run of this routine (counted as its last run, without the "already running" rule)
   threadId?: string; // run in this chat (a group) instead of the bot's own
   handoff?: boolean; // started by another bot's hand_off: runs even when MAX_PARALLEL bots are busy, uses its own browser
 };
@@ -84,12 +87,13 @@ const NOTHING_NEW = /^\s*(NOTHING NEW|NOTHING)\.?\s*$/i;
 const OFF_VOICE = /\b(great question|i'?d be (happy|glad) to (help|assist)|certainly!|i apologi[sz]e for (any|the) confusion|as an ai\b|i hope this helps|feel free to reach out|delve)\b|[\u{1F300}-\u{1FAFF}]/iu;
 
 export function runtime() {
-  const list = [...running.values()].map((r) => ({ botId: r.bot.id, label: r.label, step: r.step, startedAt: r.startedAt, model: modelName(r.model) }));
+  const list = [...running.values()].map((r) => ({ botId: r.bot.id, label: r.label, step: r.step, startedAt: r.startedAt, model: modelName(r.model), kind: r.kind, threadId: r.threadId }));
   return {
     current: list[0] ?? null,
     running: list,
     queued: waiting.map(({ botId, label }) => ({ botId, label })),
     pendingCards: pendingCards(),
+    pending: pendingList(),
     computer: computerHolder()?.botName ?? null,
   };
 }
@@ -175,7 +179,8 @@ async function execute(
   const generation = chatGeneration.get(b.id) ?? 0;
   const contextBefore = b.contextTokens ?? 0;
   const model = chooseModel(b, request, opts);
-  const r: Running = { label: opts.label, bot: b, abort, chat: opts.chat, step: "Starting…", startedAt: Date.now(), model, routineId: opts.routineId, threadId: thread, teamWaits: 0 };
+  const r: Running = { label: opts.label, bot: b, abort, chat: opts.chat, step: "Starting…", startedAt: Date.now(), model, routineId: opts.routineId, threadId: thread, teamWaits: 0,
+    kind: opts.routineId || opts.testOf ? "routine" : opts.readOnly ? "check-in" : opts.handoff ? "handoff" : opts.chat ? "chat" : "background" };
   running.set(b.id, r);
   stateChanged();
 
@@ -262,6 +267,7 @@ async function execute(
         lastActivity = Date.now();
         touch((v) => (v.plan = todos));
       },
+      onResult: (made) => touch((v) => (v.results = [...(v.results ?? []), made].slice(-12))),
       onWait: (holder) => {
         if (holder === null) return step("Got the computer");
         step(`Waiting for the computer: ${holder} is using it`);
@@ -333,6 +339,7 @@ async function execute(
       at: new Date(r.startedAt).toISOString(),
       bot: b.name,
       label: opts.label,
+      routineId: opts.routineId ?? opts.testOf,
       status,
       costUsd,
       seconds: Math.round((Date.now() - r.startedAt) / 1000),
@@ -404,7 +411,7 @@ export function handleUserMessage(text: string, opts: { botId?: string; voice?: 
   addMessage({ botId: target.id, role: "user", kind: "text", text: body, files: files.map((f) => path.relative(config.workspace, f)), meta: { voice: opts.voice } });
 
   const fileNotes = files.map((f) => `[The user attached a file, saved at: ${f}]`).join("\n");
-  const fullText = [body, fileNotes].filter(Boolean).join("\n\n") || "(see attachment)";
+  const fullText = [skillCommand(body) ?? body, fileNotes].filter(Boolean).join("\n\n") || "(see attachment)";
 
   // Steering: a message for the bot that's mid-task goes straight into that task.
   const cur = running.get(target.id);
@@ -418,6 +425,21 @@ export function handleUserMessage(text: string, opts: { botId?: string; voice?: 
       ]
     : fullText;
   runTask(target, prompt, fullText, { label: body.slice(0, 60) || "attachment", chat: true, voice: opts.voice || state.settings.voiceReplies });
+}
+
+/** "/expense-report March receipts" runs that skill (the app's "/" menu). Anything else is left alone. */
+export function skillCommand(body: string) {
+  const m = /^\/([\w][\w.-]*)(?:\s+([\s\S]*))?$/.exec(body.trim());
+  if (!m || !listSkills().some((s) => s.name === m[1])) return undefined;
+  return runSkillPrompt(m[1]!, m[2]);
+}
+
+/**
+ * Asks a bot to run a skill. It's given the file too: a chat that was already open when the skill was saved
+ * doesn't have it in its skill list yet.
+ */
+export function runSkillPrompt(name: string, details?: string) {
+  return `Use the "${name}" skill now: read ${skillPath(name)} and follow its steps.${details?.trim() ? ` Details: ${details.trim()}` : ""} Ask me for anything it needs that you don't know.`;
 }
 
 // ---------------------------------------------------------------- group chats and hand-offs
@@ -439,7 +461,7 @@ function handleGroupMessage(g: Group, text: string, opts: { voice?: boolean; att
   addMessage({ botId: g.id, role: "user", kind: "text", text: body, files: files.map((f) => path.relative(config.workspace, f)), meta: { voice: opts.voice } });
   if (!target) return;
   const fileNotes = files.map((f) => `[The user attached a file, saved at: ${f}]`).join("\n");
-  const fullText = [body, fileNotes].filter(Boolean).join("\n\n") || "(see attachment)";
+  const fullText = [skillCommand(body) ?? body, fileNotes].filter(Boolean).join("\n\n") || "(see attachment)";
   const cur = running.get(target.id);
   if (cur?.chat && cur.threadId === g.id && !files.length && cur.handle?.steer(fullText)) return;
   const team = members.filter((m) => m.id !== target.id).map((m) => `${m.name} (${m.job})`).join("; ");
@@ -595,6 +617,7 @@ export function testRoutine(id: string) {
   const b = getBot(routine.botId) ?? primaryBot();
   runTask(b, `[Test run of routine "${routine.name}" requested by the user, now ${localNow()}. It does real work.]\n\n${routine.prompt}`, routine.prompt, {
     label: `Test · ${routine.name}`,
+    testOf: routine.id,
     chat: false,
     header: `Test run · ${routine.name}`,
   });
@@ -663,6 +686,7 @@ export async function runProactive(opts: { now?: boolean } = {}) {
   const day = new Date().toLocaleDateString("en-CA", { timeZone: config.timezone });
   if (!opts.now && state.settings.proactiveMode === "morning" && state.lastProactiveDay === day) return false; // once a day, the first slot
   state.lastProactiveDay = day;
+  state.lastProactiveAt = new Date().toISOString();
   save();
   const facts = await proactiveFacts().catch(() => []);
   const recent = state.recentSuggestions.slice(-15);

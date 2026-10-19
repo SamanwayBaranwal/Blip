@@ -9,6 +9,9 @@ import { setEngines } from "./computer.js";
 import { makeCanUseTool, makeSecretGate, type RunContext } from "./permissions.js";
 import { scrub } from "./secrets.js";
 import { finishReplay, replaySetup } from "./replay.js";
+import type { RunResult } from "./hub.js";
+import { noteSkillUse } from "./skills.js";
+import { describeSchedule } from "./routines.js";
 import { recordCost, spentToday, state, type BotProfile } from "./store.js";
 import { createBlipServer } from "./tools.js";
 
@@ -64,6 +67,7 @@ function connectorServers(): Record<string, McpServerConfig> {
 type TurnResult = { sessionId?: string; failed: boolean; costUsd: number; tools?: string[] };
 type Turn = {
   onStep?: (step: string) => void;
+  onResult?: (r: RunResult) => void;
   onPartial?: (text: string) => void;
   onPlan?: (todos: Todo[]) => void;
   onReply: (text: string, isError: boolean, costSoFarUsd: number) => Promise<void>;
@@ -182,6 +186,10 @@ class Session {
           {
             hooks: [
               async (hook) => {
+                if (hook.hook_event_name === "PostToolUse") {
+                  const made = resultOf(hook.tool_name, (hook.tool_input ?? {}) as Record<string, unknown>, hook.tool_response);
+                  if (made) this.turn?.onResult?.(made);
+                }
                 const clean = "tool_response" in hook ? scrub(hook.tool_response) : undefined;
                 return clean === undefined ? {} : { hookSpecificOutput: { hookEventName: "PostToolUse" as const, updatedToolOutput: clean } };
               },
@@ -202,7 +210,7 @@ class Session {
   async runTurn(
     prompt: Content,
     request: string,
-    handlers: Pick<Turn, "onStep" | "onPlan" | "onReply" | "onPartial">,
+    handlers: Pick<Turn, "onStep" | "onPlan" | "onReply" | "onPartial" | "onResult">,
     userAbort: AbortSignal,
     run: { runId: string; model: string; onWait?: (holder: string | null) => void; runMsgId?: string; threadId?: string },
   ): Promise<TurnResult> {
@@ -296,6 +304,8 @@ class Session {
             if (block.name === "TodoWrite" && Array.isArray(input.todos)) turn.onPlan?.(input.todos as Todo[]);
             else turn.onStep?.(stepLabel(block.name, input, message.parent_tool_use_id !== null));
             turn.tools.add(block.name);
+            if (block.name === "Skill") noteSkillUse(String(input.skill ?? input.name ?? ""));
+            else if (block.name === "Read") noteSkillUse(/\/skills\/([^/]+)\/SKILL\.md$/.exec(String(input.file_path ?? ""))?.[1] ?? "");
             if (block.name.startsWith("mcp__browser__") && turn.runMsgId && !this.replayTargets.some((t) => t.msgId === turn.runMsgId)) {
               this.replayTargets.push({ botId: this.bot.id, msgId: turn.runMsgId });
             }
@@ -432,6 +442,7 @@ export function startAgent(params: {
   onWait?: (holder: string | null) => void;
   onReply: (text: string, isError: boolean, costSoFarUsd: number) => Promise<void>;
   onPartial?: (text: string) => void;
+  onResult?: (r: RunResult) => void; // something it made (a file, an event, a skill…), shown on the task
   runMsgId?: string;
   threadId?: string; // the chat it runs in (a group, or the bot's own)
   handoff?: boolean; // working for another bot: its own browser, no screen control
@@ -477,6 +488,35 @@ export function startAgent(params: {
     },
     done,
   };
+}
+
+// What a finished tool call produced, for the chips on the task ("Event added · Dentist, Oct 21 10:00").
+// Only successful calls get here; tool errors come back with isError and are skipped.
+const HIDDEN_DIRS = /^(memory|browser|screenshots|replays|inbox|\.claude|\.history)(\/|$)/;
+const when = (v: unknown) => {
+  const d = new Date(String(v ?? ""));
+  if (!v || isNaN(d.getTime())) return undefined;
+  const dateOnly = /^\d{4}-\d{2}-\d{2}$/.test(String(v));
+  return d.toLocaleString("en-US", dateOnly ? { month: "short", day: "numeric", timeZone: "UTC" } : { month: "short", day: "numeric", hour: "numeric", minute: "2-digit", timeZone: config.timezone });
+};
+export function resultOf(tool: string, input: Record<string, unknown>, response: unknown): RunResult | undefined {
+  if (response && typeof response === "object" && (response as { isError?: boolean }).isError) return undefined;
+  const str = (v: unknown) => String(v ?? "").trim();
+  if (tool === "Write") {
+    const file = str(input.file_path);
+    if (!file) return undefined;
+    const rel = path.relative(config.workspace, file);
+    const inWorkspace = !rel.startsWith("..") && !path.isAbsolute(rel);
+    if (inWorkspace && (HIDDEN_DIRS.test(rel) || path.basename(rel) === "CLAUDE.md" || /^view-\d+\.jpg$/.test(path.basename(rel)))) return undefined;
+    const folder = path.dirname(file).replace(os.homedir(), "~");
+    return { kind: "file", title: path.basename(file), sub: inWorkspace ? (path.dirname(rel) === "." ? "Workspace" : path.dirname(rel)) : folder, path: inWorkspace ? rel : undefined };
+  }
+  if (tool === "mcp__blip__calendar_add") return { kind: "event", title: str(input.title) || "Event", sub: input.allDay ? when(str(input.start).slice(0, 10)) : when(input.start) };
+  if (tool === "mcp__blip__reminders_add") return { kind: "reminder", title: str(input.title) || "Reminder", sub: when(input.due) };
+  if (tool === "mcp__blip__save_skill") return { kind: "skill", title: str(input.name) };
+  if (tool === "mcp__blip__add_routine") return { kind: "routine", title: str(input.name), sub: describeSchedule(str(input.schedule)) };
+  if (tool === "mcp__blip__add_event_routine") return { kind: "routine", title: str(input.name), sub: { webhook: "When its link is called", new_file: "When a file arrives", new_email: "When a matching email arrives" }[str(input.when)] };
+  return undefined;
 }
 
 function stepLabel(name: string, input: Record<string, unknown>, viaTeammate: boolean): string {

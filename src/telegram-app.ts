@@ -41,7 +41,7 @@ function renderRun(m: Msg) {
 
 function renderCard(m: Msg) {
   const c = m.card!;
-  const icon = { approval: "🔐", draft: "📝", takeover: "🖐", suggestion: "💡", secret: "🔑" }[c.type];
+  const icon = { approval: "🔐", draft: "📝", takeover: "🖐", suggestion: "💡", secret: "🔑", check: "⚠️" }[c.type];
   const body = c.draft ? `To: ${c.draft.to}${c.draft.subject ? `\nSubject: ${c.draft.subject}` : ""}\n\n${c.draft.body}` : c.body;
   return `${icon} ${nameTag(m.botId)}${c.title}\n${body}${c.note ? `\n\n${c.note}` : ""}${c.answer ? `\n\n→ ${c.answer}` : ""}`.slice(0, 4096);
 }

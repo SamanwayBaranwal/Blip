@@ -22,6 +22,11 @@ export function pendingList() {
   return [...pending.entries()].map(([id, p]) => ({ id, botId: p.botId, type: p.type, title: p.title, blocking: blocking(p.type) }));
 }
 
+/** The buttons a phone notification may offer for a card: only ones asked for, that exist, at most 2. */
+export function notificationActions(buttons: CardButton[], wanted: string[] = []) {
+  return wanted.map((v) => buttons.find((b) => b.value === v)).filter((b): b is CardButton => !!b).slice(0, 2);
+}
+
 export async function askCard(input: {
   botId: string;
   type: CardView["type"];
@@ -45,7 +50,7 @@ export async function askCard(input: {
     card: { type: input.type, title: input.title, body: input.body, note: input.note, buttons: input.buttons, draft: input.draft, status: "pending" },
   });
   const name = chatName(input.botId) ?? "Your bot";
-  const actions = (input.pushActions ?? []).map((v) => input.buttons.find((b) => b.value === v)).filter((b): b is CardButton => !!b).slice(0, 2);
+  const actions = notificationActions(input.buttons, input.pushActions);
   void push({
     title: input.type === "suggestion" ? `${name} has a suggestion` : input.type === "check" ? `${name}: double-check failed` : `${name} needs you`,
     body: input.title,

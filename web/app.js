@@ -47,7 +47,9 @@ function nativeBadge(count) {
 }
 
 // ============================================================ store
-const store = { state: null, threads: {}, unread: {}, toast: null, listeners: new Set() };
+const store = { state: null, threads: {}, unread: {}, toast: null, speaking: false, listeners: new Set() };
+// Set by Shell, so anything (a result chip, a "/" command, an empty-state tile) can open a sheet or a chat.
+const ui = { openSheet: () => {}, select: () => {}, setControl: () => {} };
 const emit = () => store.listeners.forEach((l) => l());
 function useStore() {
   const [, force] = useState(0);
@@ -126,8 +128,19 @@ async function pollThread(botId) {
   store.threads = { ...store.threads, [botId]: messages };
   emit();
 }
+// Quiet confirmations: when a task saves something (a file, an event, a skill) or the double-check passes,
+// a short toast says so, wherever you are in the app.
+const short = (t, n) => (t.length > n ? `${t.slice(0, n - 1).replace(/[\s,;:]+\S*$/, "")}…` : t);
+const RESULT_WORD = { file: "File saved", event: "Event added", reminder: "Reminder added", skill: "Skill saved", routine: "Routine added" };
+const resultText = (x) => [RESULT_WORD[x.kind] || "Done", x.title, x.sub].filter(Boolean).join(" · ");
+function confirmQuietly(m, prev) {
+  const made = m.run?.results || [];
+  if (made.length > (prev?.run?.results?.length || 0)) return toast(short(resultText(made.at(-1)), 90));
+  if (!prev && m.role === "system" && /^Checked: /.test(m.text || "")) toast(short(m.text.replace(/\.$/, ""), 90));
+}
 function upsert(m, live) {
   const list = store.threads[m.botId];
+  if (live) confirmQuietly(m, list?.find((x) => x.id === m.id));
   if (list) store.threads = { ...store.threads, [m.botId]: mergeById(list, [m]) };
   else if (loading[m.botId]) loading[m.botId].push(m);
   const isNew = !seen.has(m.id);
@@ -164,8 +177,14 @@ function speakText(text) {
   if (!("speechSynthesis" in window)) return Promise.resolve();
   const clean = text.replace(/```[\s\S]*?```/g, " ").replace(/[•*_#`>]/g, "").replace(/https?:\/\/\S+/g, "link").slice(0, 2500);
   const parts = clean.match(/[^.!?\n]+[.!?]*\s*/g)?.map((p) => p.trim()).filter(Boolean) ?? [];
+  const done = () => {
+    store.speaking = false;
+    emit();
+  };
   speechDone = new Promise((resolve) => {
     if (!parts.length) return resolve();
+    store.speaking = true;
+    emit();
     const voice = bestVoice();
     parts.forEach((p, i) => {
       const u = new SpeechSynthesisUtterance(p);
@@ -175,7 +194,7 @@ function speakText(text) {
       speechSynthesis.speak(u);
     });
     setTimeout(resolve, 3 * 60_000); // never wait forever
-  });
+  }).finally(done);
   return speechDone;
 }
 
@@ -303,6 +322,11 @@ const I = {
   xCircle: () => svg(html`<circle cx="12" cy="12" r="9" /><path d="m9 9 6 6M15 9l-6 6" />`),
   pauseCircle: () => svg(html`<circle cx="12" cy="12" r="9" /><path d="M10 9v6M14 9v6" />`),
   dash: () => svg(html`<circle cx="12" cy="12" r="9" /><path d="M8.5 12h7" />`),
+  calendar: () => svg(html`<rect x="3.5" y="5" width="17" height="15" rx="2" /><path d="M3.5 10h17M8 3v4M16 3v4" />`),
+  bell: () => svg(html`<path d="M6 16V11a6 6 0 0 1 12 0v5l1.5 2h-15zM10 20.5a2 2 0 0 0 4 0" />`),
+  repeat: () => svg(html`<path d="M4 11V9a3 3 0 0 1 3-3h12M16 3l3 3-3 3M20 13v2a3 3 0 0 1-3 3H5M8 21l-3-3 3-3" />`),
+  slash: () => svg(html`<path d="M15 4 9 20" />`),
+  shield: () => svg(html`<path d="M12 3 5 6v6c0 4.2 3 7.6 7 9 4-1.4 7-4.8 7-9V6z" />`),
 };
 // Blip, the mascot: a mouse pointer that came alive. Its state (idle, working, needs, done, sleep) is CSS-driven.
 // Every bot can dress its Blip differently: body color, hat, eyewear, facial hair, neckwear and something to hold.
@@ -642,6 +666,7 @@ function RunBlock({ m, bot: chatBot }) {
       ${live ? html`<span class="time">${r.model ? `${r.model} · ` : ""}${dur(elapsed)}</span>` : null}
       <span class=${`chev ${isOpen ? "open" : ""}`}><${I.chevron} /></span>
     </button>
+    ${r.results?.length ? html`<div class="results">${r.results.map((x, i) => html`<${ResultChip} key=${i} x=${x} />`)}</div>` : null}
     ${r.replay && !live
       ? html`<button class="replay-link" onClick=${() => setOpen(true)}><${I.play} /> Watch replay${isOpen ? "" : " · what it did in the browser"}</button>`
       : null}
@@ -660,7 +685,55 @@ function RunBlock({ m, bot: chatBot }) {
   </div>${streaming}`;
 }
 
-const KICKER = { approval: "Needs your approval", draft: "Draft · review before it's sent", takeover: "Your turn", suggestion: "Suggestion", secret: "Secret · saved to the Keychain" };
+/** Something a task made, right on the task: tap a file to open it, a skill to read it, a routine to see it. */
+const RESULT_ICON = { file: I.files, event: I.calendar, reminder: I.bell, skill: I.book, routine: I.repeat };
+function ResultChip({ x }) {
+  const Icon = RESULT_ICON[x.kind] || I.okCircle;
+  const inner = html`<span class="r-icon"><${Icon} /></span><span class="r-text"><b>${x.title}</b><span>${[RESULT_WORD[x.kind], x.sub].filter(Boolean).join(" · ")}</span></span>`;
+  if (x.kind === "file" && x.path) return html`<a class="result" href=${fileUrl(x.path)} target="_blank" rel="noopener">${inner}</a>`;
+  if (x.kind === "skill") return html`<button class="result" onClick=${() => ui.openSheet({ type: "skills", open: x.title })}>${inner}</button>`;
+  if (x.kind === "routine") return html`<button class="result" onClick=${() => ui.openSheet({ type: "routines" })}>${inner}</button>`;
+  return html`<div class="result">${inner}</div>`;
+}
+
+const KICKER = { approval: "Needs your approval", draft: "Draft · review before it's sent", takeover: "Your turn", suggestion: "Suggestion", secret: "Secret · saved to the Keychain", check: "Double-check failed" };
+
+// Suggestions and failed double-checks wait in a tray at the top of the chat (one tap to act, × to dismiss)
+// instead of getting lost in the scroll. Once answered they show in the chat like any other card.
+const inTray = (m) => m.kind === "card" && m.card.status === "pending" && (m.card.type === "suggestion" || m.card.type === "check");
+function SuggestionTray({ messages }) {
+  const items = (messages || []).filter(inTray).reverse();
+  const [openId, setOpenId] = useState(null);
+  const [all, setAll] = useState(false);
+  const [busy, setBusy] = useState(null);
+  if (!items.length) return null;
+  const answer = (m, b, main) => {
+    setBusy(m.id);
+    api(`/card/${m.id}`, { method: "POST", body: { value: b.value } })
+      .then(() => toast(main ? (m.card.type === "check" ? "Sent back to fix it" : "On it") : b.value === "no" ? "Dismissed. Blip will suggest less like this." : "Dismissed"))
+      .catch(fail)
+      .finally(() => setBusy(null));
+  };
+  const shown = all ? items : items.slice(0, 2);
+  return html`<div class="tray" role="region" aria-label="Suggestions">
+    ${shown.map((m) => {
+      const c = m.card;
+      const main = c.buttons.find((b) => b.style === "primary") || c.buttons[0];
+      const dismiss = c.buttons.find((b) => b !== main);
+      const open = openId === m.id;
+      return html`<div key=${m.id} class=${`tray-item ${c.type}`}>
+        <button class="tray-text" onClick=${() => setOpenId(open ? null : m.id)} aria-expanded=${open}>
+          <span class="tray-kicker"><span class="k-dot" />${KICKER[c.type]}${botById(m.botId) && m.botId !== selectedBot() ? ` · ${botById(m.botId).name}` : ""}</span>
+          <b>${c.title.replace(/^Double-check failed:\s*/, "")}</b>
+          ${open && c.body ? html`<span class="tray-body">${c.body}</span>` : null}
+        </button>
+        <button class="btn small primary" disabled=${busy === m.id} onClick=${() => answer(m, main, true)}>${c.type === "check" ? "Fix it" : main.label}</button>
+        ${dismiss ? html`<button class="icon-btn" disabled=${busy === m.id} aria-label=${dismiss.label} title=${dismiss.label} onClick=${() => answer(m, dismiss, false)}><${I.close} /></button>` : null}
+      </div>`;
+    })}
+    ${items.length > 2 ? html`<button class="tray-more" onClick=${() => setAll(!all)}>${all ? "Show fewer" : `${items.length - 2} more`}</button>` : null}
+  </div>`;
+}
 
 function Card({ m, onTakeover }) {
   const c = m.card;
@@ -683,7 +756,7 @@ function Card({ m, onTakeover }) {
   };
   return html`<div class=${`card ${c.type} ${pending ? "pending" : ""}`}>
     <div class="card-kicker"><span class="k-dot" />${KICKER[c.type]}</div>
-    <div class="card-title">${c.title}</div>
+    <div class="card-title">${c.type === "check" ? c.title.replace(/^Double-check failed:\s*/, "") : c.title}</div>
     ${c.draft
       ? html`<div class="hint">To: ${c.draft.to}${c.draft.subject ? html` · Subject: <b>${c.draft.subject}</b>` : null}</div>
         ${pending
@@ -726,7 +799,7 @@ function MessageList({ bot, messages, onImage, onTakeover }) {
     <div class="messages-inner">
       ${messages === undefined ? html`<div class="empty">Loading…</div>` : null}
       ${messages?.length === 0 ? html`<div class="hello" style="min-height:50vh"><${Blip} size=${104} look=${bot.look} /><h1>${bot.name}</h1><p>${bot.job}</p></div>` : null}
-      ${(messages || []).map((m) =>
+      ${(messages || []).filter((m) => !inTray(m)).map((m) =>
         m.kind === "run" ? html`<${RunBlock} key=${m.id} m=${m} bot=${bot} />`
         : m.kind === "card" ? html`<${Card} key=${m.id} m=${m} onTakeover=${onTakeover} />`
         : html`<${TextMsg} key=${m.id} m=${m} bot=${bot} onImage=${onImage} />`,
@@ -820,6 +893,7 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
   // Talk mode: a hands-free conversation. Listen → send → wait for the reply → hear it → listen again.
   const [talk, setTalk] = useState(false);
   const [talkState, setTalkState] = useState("");
+  const [talkStream, setTalkStream] = useState(null);
   useEffect(() => {
     if (!talk) return;
     let on = true, stream;
@@ -831,6 +905,7 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
         toast("Talk mode needs the mic. On iPhone use the https:// Tailscale link and allow the microphone.");
         return setTalk(false);
       }
+      if (on) setTalkStream(stream);
       while (on) {
         setTalkState("Listening…");
         const blob = await recordUtterance(stream, stillOn);
@@ -874,6 +949,7 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
       stream?.getTracks().forEach((t) => t.stop());
       if ("speechSynthesis" in window) speechSynthesis.cancel();
       setTalkState("");
+      setTalkStream(null);
     };
   }, [talk, bot.id]);
 
@@ -933,16 +1009,63 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
       );
     }
   };
+  // The "/" menu: commands and saved skills. "/name details" runs a skill; commands act right away.
+  const slashQuery = /^\/([\w.-]*)$/.exec(text)?.[1]?.toLowerCase();
+  const [skillList, setSkillList] = useState(null);
+  const [menuIndex, setMenuIndex] = useState(0);
+  const [menuClosed, setMenuClosed] = useState(false);
+  useEffect(() => {
+    if (slashQuery !== undefined) api("/skills").then(setSkillList).catch(() => setSkillList([]));
+  }, [slashQuery !== undefined]);
+  useEffect(() => (setMenuIndex(0), setMenuClosed(false)), [slashQuery]);
+  const commands = [
+    { cmd: "new", label: "Start a new chat (memory is kept)", run: () => api(bot.group ? `/groups/${bot.id}/fresh` : `/bots/${bot.id}/fresh`, { method: "POST" }).then(() => loadThread(bot.id)).then(() => toast("New chat")) },
+    ...(running ? [{ cmd: "stop", label: "Stop the task in progress", run: () => api("/stop", { method: "POST", body: { botId: bot.id } }) }] : []),
+    { cmd: "talk", label: "Hands-free voice conversation", run: () => (speakText(""), setTalk(true)) },
+    { cmd: "remote", label: "See and control the Mac's screen", run: () => ui.setControl(true) },
+    { cmd: "skills", label: "Your skills: run, edit, record", run: () => ui.openSheet({ type: "skills" }) },
+    { cmd: "teach", label: "Teach a task by doing it once on the Mac", run: () => ui.openSheet({ type: "skills" }) },
+    { cmd: "routines", label: "Scheduled and event routines", run: () => ui.openSheet({ type: "routines" }) },
+    { cmd: "checkin", label: "Look around now for anything slipping", run: () => api("/proactive/run", { method: "POST" }).then((r) => toast(r.started ? "Checking in. Anything useful shows up as a suggestion." : "A check-in is already running")) },
+  ];
+  const menu = slashQuery === undefined || menuClosed ? [] : [
+    ...commands.map((c) => ({ ...c, kind: "command" })),
+    ...(skillList || []).map((sk) => ({ cmd: sk.name, label: sk.description, kind: "skill" })),
+  ].filter((i) => i.cmd.toLowerCase().startsWith(slashQuery)).slice(0, 8);
+  const choose = (item) => {
+    if (item.kind === "skill") {
+      setText(`/${item.cmd} `);
+      setTimeout(() => ta.current?.focus(), 0);
+      return;
+    }
+    setText("");
+    Promise.resolve(item.run()).catch(fail);
+  };
   const onKey = (e) => {
+    if (menu.length) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        return setMenuIndex((i) => (i + (e.key === "ArrowDown" ? 1 : -1) + menu.length) % menu.length);
+      }
+      if (e.key === "Escape") return setMenuClosed(true);
+      if ((e.key === "Enter" && !e.shiftKey) || e.key === "Tab") {
+        e.preventDefault();
+        return choose(menu[Math.min(menuIndex, menu.length - 1)]);
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey && !coarse) {
       e.preventDefault();
       send();
     }
   };
   const empty = !text.trim() && !files.length;
-  const queued = st.runtime.queued.length;
-  const hint = talk ? `Talk mode · ${talkState || "Starting…"} Say "stop talking" or tap the wave to end.` : rec ? "Listening. Tap the mic again (or let go) to send." : running ? "Messages you send now steer the task in progress." : queued ? `${queued} task${queued > 1 ? "s" : ""} queued` : "";
   return html`<div class="composer-wrap">
+    ${talk ? html`<${TalkOrb} phase=${talkState || "Starting…"} stream=${talkStream} onEnd=${() => setTalk(false)} />` : null}
+    ${menu.length
+      ? html`<div class="slash-menu" role="listbox">${menu.map((item, i) => html`<button role="option" aria-selected=${i === menuIndex} class=${`slash-item ${i === menuIndex ? "on" : ""}`} onPointerDown=${(e) => e.preventDefault()} onClick=${() => choose(item)} onMouseEnter=${() => setMenuIndex(i)}>
+          <span class="slash-cmd">/${item.cmd}</span><span class="slash-label">${item.label}</span>${item.kind === "skill" ? html`<span class="slash-kind">Skill</span>` : null}
+        </button>`)}</div>`
+      : null}
     <div class="composer">
       ${files.length
         ? html`<div class="attach-list">${files.map((f, i) => html`<span class="chip">${f.preview ? html`<img src=${f.preview} style="width:20px;height:20px;border-radius:4px;object-fit:cover" />` : html`<${I.clip} />`} ${f.name.slice(0, 24)}
@@ -961,7 +1084,78 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
           : html`<button class="send" disabled=${empty || busy} onClick=${() => send()} aria-label="Send"><${I.send} /></button>`}
       </div>
     </div>
-    <div class="composer-hint">${hint}</div>
+    ${talk ? null : html`<${StatusLine} bot=${bot} st=${st} rec=${!!rec} />`}
+  </div>`;
+}
+
+/**
+ * What the bot is doing right now, always in the same spot under the input: listening, thinking, working on
+ * a step, running a routine, waiting for your approval, speaking. Nobody has to guess.
+ */
+function StatusLine({ bot, st, rec }) {
+  const rt = st.runtime;
+  const mine = rt.running.find((r) => (bot.group ? r.threadId === bot.id : r.botId === bot.id));
+  const queued = rt.queued.filter((q) => q.botId === bot.id || (bot.group && bot.group.members.includes(q.botId))).length;
+  const now = useNow(!!mine, 1000);
+  let tone = "", text = "", extra = null;
+  if (rec) [tone, text] = ["rec", "Listening · tap the mic again, or let go, to send"];
+  else if (bot.waiting) {
+    [tone, text] = ["wait", `Waiting for your approval${bot.waiting > 1 ? ` (${bot.waiting})` : ""}`];
+    extra = html`<button class="status-act" onClick=${() => document.querySelector(".card.pending")?.scrollIntoView({ behavior: "smooth", block: "center" })}>Show</button>`;
+  } else if (store.speaking) {
+    [tone, text] = ["live", "Speaking"];
+    extra = html`<button class="status-act" onClick=${() => speechSynthesis.cancel()}>Stop</button>`;
+  } else if (mine) {
+    const who = bot.group ? `${botById(mine.botId)?.name || "A bot"} · ` : mine.threadId !== bot.id ? `In ${(st.groups || []).find((g) => g.id === mine.threadId)?.name || "another chat"} · ` : "";
+    const step = mine.step && mine.step !== "Starting…" ? mine.step : "";
+    text = mine.kind === "routine" ? `Running routine · ${mine.label}`
+      : mine.kind === "check-in" ? "Checking in · read-only"
+      : /^Waiting for the computer/.test(step) ? step
+      : step ? `Working · ${step}` : "Thinking…";
+    text = who + text;
+    tone = /^Waiting for the computer/.test(step) ? "wait" : "live";
+    extra = html`<span class="status-time">${dur(now - mine.startedAt)}</span>`;
+  } else if (queued) [tone, text] = ["", `${queued} task${queued > 1 ? "s" : ""} queued · starts when a slot frees up`];
+  return html`<div class=${`status-line ${tone}`} role="status" aria-live="polite">
+    ${text ? html`<span class="s-dot" /><span class="s-text">${text}</span>${extra}` : html`<span class="s-idle">Type / for skills and commands</span>`}
+  </div>`;
+}
+
+/** Talk mode, visible: the circle follows your voice while listening, pulses while thinking, waves while speaking. */
+function TalkOrb({ phase, stream, onEnd }) {
+  const ref = useRef();
+  const mode = /^Listening/.test(phase) ? "listening" : /^Speaking/.test(phase) ? "speaking" : /^Needs/.test(phase) ? "needs" : "thinking";
+  useEffect(() => {
+    if (!stream || mode !== "listening") return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    const ctx = new AC();
+    ctx.resume?.().catch(() => {});
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 512;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    let level = 0, raf;
+    const loop = () => {
+      analyser.getFloatTimeDomainData(buf);
+      const rms = Math.sqrt(buf.reduce((sum, v) => sum + v * v, 0) / buf.length);
+      level = level * 0.6 + Math.min(1, rms * 9) * 0.4;
+      ref.current?.style.setProperty("--lvl", level.toFixed(3));
+      raf = requestAnimationFrame(loop);
+    };
+    loop();
+    return () => {
+      cancelAnimationFrame(raf);
+      ctx.close().catch(() => {});
+      ref.current?.style.setProperty("--lvl", "0");
+    };
+  }, [stream, mode]);
+  const label = { listening: "Listening", thinking: /^Transcribing/.test(phase) ? "Got it" : "Thinking", speaking: "Speaking", needs: "Needs your OK" }[mode];
+  const sub = { listening: "Talk normally. A short pause sends it.", thinking: "Working on your answer", speaking: "Talk when it's done", needs: "Tap the card in the chat. Approvals are never given by voice." }[mode];
+  return html`<div class=${`talk-orb ${mode}`} ref=${ref} role="status" aria-live="polite">
+    <div class="orb">${[0.55, 0.85, 1, 0.85, 0.55].map((k, i) => html`<i style=${`--k:${k};--i:${i}`} />`)}</div>
+    <div class="talk-text"><b>${label}</b><span>${sub}</span></div>
+    <button class="btn small" onClick=${onEnd}>End</button>
   </div>`;
 }
 
@@ -1670,7 +1864,10 @@ function RoutinesSheet({ st, botId, onClose }) {
   return html`<${Sheet} title="Routines" onClose=${onClose}>
     ${routines === null ? html`<div class="empty">Loading…</div>`
       : routines.length ? html`<div class="list">${routines.map((r) => html`<div class="row">
-          <div class="grow"><b>${r.name}</b><span>${r.bot} · ${r.when ? r.when : `${r.schedule} · next ${r.next ? fmtDay(r.next) : "—"}`}</span></div>
+          <div class="grow"><b>${r.name}</b><span>${r.bot} · ${r.when ? r.when : `${r.scheduleText || r.schedule} · next ${r.next ? fmtDay(r.next) : "—"}`}</span>
+            <span class=${`row-meta ${r.lastRun?.status === "failed" ? "bad" : ""}`}>${r.lastRun
+              ? html`<span class="state-dot"><${r.lastRun.status === "done" ? I.okCircle : r.lastRun.status === "failed" ? I.xCircle : I.dash} /></span> Last run ${ago(Date.parse(r.lastRun.at))} · ${{ done: "worked", failed: "failed", stopped: "stopped", "nothing new": "nothing new" }[r.lastRun.status] || r.lastRun.status}${r.lastRun.status === "failed" && r.lastRun.summary ? ` · ${r.lastRun.summary}` : ""}`
+              : "Hasn't run yet"}</span></div>
           ${r.hook ? html`<button class="btn small" onClick=${() => copyText(location.origin + r.hook, "Link copied. Treat it like a password.")}>Copy link</button>` : null}
           <button class="btn small" onClick=${() => run(r)}><${I.play} /> Test</button>
           <button class="icon-btn" onClick=${() => del(r)} aria-label="Delete"><${I.trash} /></button>
@@ -1681,7 +1878,7 @@ function RoutinesSheet({ st, botId, onClose }) {
   <//>`;
 }
 
-function SkillsSheet({ botId, onClose, setControl }) {
+function SkillsSheet({ botId, onClose, setControl, initial }) {
   const [skills, reload] = useLoad(() => api("/skills"), []);
   const [library, reloadLibrary] = useLoad(() => api("/skills/library"), []);
   const [editing, setEditing] = useState(null); // { name, text, versions }
@@ -1700,6 +1897,7 @@ function SkillsSheet({ botId, onClose, setControl }) {
   const run = (s) => api(`/skills/${s.name}/run`, { method: "POST", body: { botId } }).then(() => { toast(`Running ${s.name}`); onClose(); }).catch(fail);
   const del = (s) => confirm(`Delete skill "${s.name}"?`) && api(`/skills/${s.name}`, { method: "DELETE" }).then(reload).catch(fail);
   const open = (s) => api(`/skills/${s.name}`).then(setEditing).catch(fail);
+  useEffect(() => void (initial && open({ name: initial })), [initial]);
   const saveEdit = () => api(`/skills/${editing.name}`, { method: "PUT", body: { text: editing.text } }).then(() => { toast("Skill saved"); setEditing(null); reload(); }).catch(fail);
   const record = (e) => {
     e.preventDefault();
@@ -1739,7 +1937,8 @@ function SkillsSheet({ botId, onClose, setControl }) {
       <input type="file" accept=".md,text/markdown,text/plain" hidden ref=${importInput} onChange=${importFile} /></div>
     ${skills === null ? html`<div class="empty">Loading…</div>`
       : skills.length ? html`<div class="list">${skills.map((s) => html`<div class="row">
-          <button class="grow skill-open" onClick=${() => open(s)}><b>${s.name}</b><span>${s.description}</span></button>
+          <button class="grow skill-open" onClick=${() => open(s)}><b>${s.name}</b><span>${s.description}</span>
+            <span class="row-meta">v${s.version || 1} · ${s.lastUsed ? `last used ${ago(Date.parse(s.lastUsed))}${s.uses > 1 ? ` · ${s.uses} uses` : ""}` : "not used yet"}</span></button>
           <button class="btn small" onClick=${() => run(s)}><${I.play} /> Run</button>
           <button class="icon-btn" onClick=${() => del(s)} aria-label="Delete"><${I.trash} /></button>
         </div>`)}</div>`
@@ -1904,7 +2103,7 @@ function HealthSection() {
       .finally(() => { setBusy(null); setArmed(false); });
   };
   const b = h?.lastBackup, t = h?.lastSelfTest;
-  return html`<div class="section-title">This Mac</div>
+  return html`<div class="section-title" id="this-mac">This Mac</div>
     <div class="list">
       <div class="row"><div class="grow"><b>Self-test</b><span>${t ? `${t.passed}/${t.total} passed · ${fmtDay(Date.parse(t.at))}${t.failures.length ? ` · ${t.failures.join("; ")}` : ""}` : "Runs every night at 03:40"}</span></div>
         <button class="btn small" disabled=${!!busy} onClick=${() => act("selftest", (r) => `${r.passed}/${r.total} checks passed`)}>${busy === "selftest" ? "Testing…" : "Run now"}</button></div>
@@ -1933,7 +2132,11 @@ function HealthSection() {
     <${HeartbeatRow} h=${h} reload=${reload} />`;
 }
 
-function SettingsSheet({ st, onClose }) {
+function SettingsSheet({ st, onClose, focus }) {
+  // Opened from somewhere specific (e.g. the "Check Mac access" tile): scroll to that part.
+  useEffect(() => {
+    if (focus) setTimeout(() => document.getElementById(focus)?.scrollIntoView({ behavior: "smooth", block: "start" }), 350);
+  }, [focus]);
   const [rules, reloadRules] = useLoad(() => api("/rules"), []);
   const [connectors, reloadConnectors] = useLoad(() => api("/connectors"), []);
   const [secrets, reloadSecrets] = useLoad(() => api("/secrets"), []);
@@ -2164,13 +2367,79 @@ function ConnectClaude() {
 }
 
 // ============================================================ main view
+// The empty chat offers a few real first steps instead of a blank page.
 const STARTERS = [
-  { label: "Morning inbox brief", routine: "inbox" },
-  { label: "What am I forgetting?", routine: "forgetting" },
-  { label: "Find the best price on…", text: "Find the best price on " },
-  { label: "Plan my week", text: "Look at my calendar and plan my week: " },
-  { label: "Research a topic", text: "Research this and send me a short PDF report: " },
+  { title: "Morning brief", sub: "Inbox and day, every morning at 8", icon: "clock", routine: "inbox" },
+  { title: "What am I forgetting?", sub: "A daily sweep for loose ends", icon: "bell", routine: "forgetting" },
+  { title: "Teach me a task", sub: "Show it once; I'll repeat it", icon: "book", sheet: { type: "skills" } },
+  { title: "Check Mac access", sub: "Calendar, Mail, screen and more", icon: "shield", sheet: { type: "settings", focus: "this-mac" } },
+  { title: "Research a topic", sub: "A short PDF report", icon: "files", text: "Research this and send me a short PDF report: " },
+  { title: "Find the best price", sub: "Compare shops for you", icon: "pulse", text: "Find the best price on " },
 ];
+const GROUP_STARTERS = [
+  { title: "Split a big job", sub: "The team works on it in parallel", icon: "pulse", text: "Split this between the team and give me one combined answer: " },
+  { title: "Ask one bot", sub: "Start with @Name", icon: "slash", text: "@" },
+  { title: "Add a helper", sub: "A new bot made for this job", icon: "plus", text: "Make a helper bot that " },
+];
+function StarterTiles({ bot, onPreset }) {
+  const start = (x) => {
+    if (x.routine) api("/templates/routine", { method: "POST", body: { key: x.routine, botId: bot.id } }).catch(fail);
+    else if (x.sheet) ui.openSheet(x.sheet);
+    else onPreset(x.text);
+  };
+  return html`<div class="tiles">${(bot.group ? GROUP_STARTERS : STARTERS).map((x) => {
+    const Icon = I[x.icon] || I.plus;
+    return html`<button class="tile" onClick=${() => start(x)}><span class="tile-icon"><${Icon} /></span><b>${x.title}</b><span>${x.sub}</span></button>`;
+  })}</div>`;
+}
+
+/**
+ * Everything going on across all bots, in one thin line under the top bar: what's running, what needs you,
+ * what's queued, the next routine and the last check-in. Tap it for the details; tap a row to go there.
+ */
+function ActivityStrip({ st }) {
+  const rt = st.runtime;
+  const [open, setOpen] = useState(false);
+  const needs = (rt.pending || []).filter((p) => p.blocking);
+  const live = rt.running.length > 0;
+  const now = useNow(live || open, live ? 1000 : 30_000);
+  if (!live && !needs.length && !rt.queued.length && !st.nextRoutine && !st.lastCheckIn) return null;
+  const nameOf = (id) => botById(id)?.name || (st.groups || []).find((g) => g.id === id)?.name || "Blip";
+  const go = (id) => (ui.select(id), setOpen(false));
+  const when = (iso) => {
+    const t = Date.parse(iso);
+    const sameDay = new Date(t).toDateString() === new Date().toDateString();
+    return sameDay ? fmtTime(t) : new Date(t).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
+  };
+  const parts = [];
+  if (needs.length) parts.push(html`<b class="warn">${needs.length} need${needs.length === 1 ? "s" : ""} you</b>`);
+  if (rt.running.length === 1) parts.push(html`<span>${nameOf(rt.running[0].botId)} · ${rt.running[0].label}</span>`);
+  else if (live) parts.push(html`<span>${rt.running.length} tasks running</span>`);
+  if (rt.queued.length) parts.push(html`<span>${rt.queued.length} queued</span>`);
+  if (!live && !needs.length && !rt.queued.length) {
+    parts.push(html`<span>All quiet</span>`);
+    if (st.nextRoutine) parts.push(html`<span>Next: ${st.nextRoutine.name} ${when(st.nextRoutine.at)}</span>`);
+    else if (st.lastCheckIn) parts.push(html`<span>Checked in ${ago(Date.parse(st.lastCheckIn))}</span>`);
+  }
+  const checkNow = () => api("/proactive/run", { method: "POST" }).then((r) => toast(r.started ? "Checking in now" : "A check-in is already running")).catch(fail);
+  return html`<div class=${`strip ${open ? "open" : ""}`}>
+    <button class="strip-line" onClick=${() => setOpen(!open)} aria-expanded=${open}>
+      <span class=${`s-dot ${needs.length ? "wait" : live ? "live" : ""}`} />
+      <span class="strip-parts">${parts.map((p, i) => html`${i ? html`<i>·</i>` : null}${p}`)}</span>
+      <span class=${`chev ${open ? "open" : ""}`}><${I.chevron} /></span>
+    </button>
+    ${open
+      ? html`<div class="strip-body">
+          ${needs.length ? html`<div class="strip-title">Needs you</div>${needs.map((p) => html`<button class="strip-row" onClick=${() => go(p.botId)}><span class="s-dot wait" /><span class="grow"><b>${p.title}</b><span>${nameOf(p.botId)}</span></span><${I.chevron} /></button>`)}` : null}
+          ${live ? html`<div class="strip-title">Running</div>${rt.running.map((r) => html`<button class="strip-row" onClick=${() => go(r.threadId || r.botId)}><span class="s-dot live" /><span class="grow"><b>${nameOf(r.botId)} · ${r.label}</b><span>${r.kind === "routine" ? "Routine · " : r.kind === "check-in" ? "Check-in · " : ""}${r.step}</span></span><span class="status-time">${dur(now - r.startedAt)}</span></button>`)}` : null}
+          ${rt.queued.length ? html`<div class="strip-title">Queued</div>${rt.queued.map((q) => html`<button class="strip-row" onClick=${() => go(q.botId)}><span class="s-dot" /><span class="grow"><b>${nameOf(q.botId)} · ${q.label}</b><span>Starts when a slot frees up</span></span></button>`)}` : null}
+          <div class="strip-title">Background</div>
+          <button class="strip-row" onClick=${() => (ui.openSheet({ type: "routines" }), setOpen(false))}><span class="r-icon"><${I.repeat} /></span><span class="grow"><b>${st.nextRoutine ? `Next routine: ${st.nextRoutine.name}` : "No routines on a schedule"}</b><span>${st.nextRoutine ? `${when(st.nextRoutine.at)} · ${nameOf(st.nextRoutine.botId)}` : "Ask a bot to do something every day, or pick one in Routines"}</span></span><${I.chevron} /></button>
+          <div class="strip-row static"><span class="r-icon"><${I.pulse} /></span><span class="grow"><b>Check-ins ${st.settings.proactive ? (st.settings.proactiveMode === "morning" ? "· mornings" : "· 3 times a day") : "· off"}</b><span>${st.lastCheckIn ? `Last one ${ago(Date.parse(st.lastCheckIn))}` : "None yet"}</span></span><button class="btn small" onClick=${checkNow}>Check now</button></div>
+        </div>`
+      : null}
+  </div>`;
+}
 
 const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 const standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
@@ -2203,10 +2472,6 @@ function ChatView({ st, bot, onMenu, panel, setPanel, onSheet, onImage, setContr
   const [preset, setPreset] = useState(null);
   const togglePanel = (tab) => setPanel(panel === tab ? null : tab);
   const fresh = messages && messages.filter((m) => m.role === "user").length === 0;
-  const starter = (x) =>
-    x.routine
-      ? api("/templates/routine", { method: "POST", body: { key: x.routine, botId: bot.id } }).catch(fail)
-      : setPreset(x.text);
   const anyAttention = Object.keys(store.unread).some((k) => store.unread[k] && k !== bot.id) || st.runtime.pendingCards;
   return html`<main class="main">
     <header class="topbar">
@@ -2220,9 +2485,11 @@ function ChatView({ st, bot, onMenu, panel, setPanel, onSheet, onImage, setContr
       ${bot.group ? null : html`<button class=${`icon-btn ${panel === "memory" ? "on" : ""}`} onClick=${() => togglePanel("memory")} aria-label="Memory" title="Memory"><${I.brain} /></button>`}
       <button class="icon-btn" onClick=${() => onSheet({ type: "bot" })} aria-label=${bot.group ? "Group settings" : "Bot settings"} title=${bot.group ? "Group settings" : "Bot settings"}><${I.more} /></button>
     </header>
+    <${ActivityStrip} st=${st} />
     <${InstallHint} />
+    <${SuggestionTray} messages=${messages} />
     <${MessageList} bot=${bot} messages=${messages} onImage=${onImage} onTakeover=${() => { setPanel("computer"); setControl(true); }} />
-    ${fresh && !bot.group ? html`<div class="starters">${STARTERS.map((x) => html`<button class="starter" onClick=${() => starter(x)}>${x.label}</button>`)}</div>` : null}
+    ${fresh ? html`<${StarterTiles} bot=${bot} onPreset=${setPreset} />` : null}
     <${Composer} key=${bot.id} bot=${bot} st=${st} onModel=${() => onSheet({ type: "bot" })} preset=${preset} clearPreset=${() => setPreset(null)} />
   </main>`;
 }
@@ -2304,6 +2571,9 @@ function Shell() {
       panel ? localStorage.setItem("panel", panel) : localStorage.removeItem("panel");
     } catch {}
   }, [panel]);
+  ui.openSheet = (x) => (setSheet(x), setSidebar(false));
+  ui.select = (id) => select(id);
+  ui.setControl = setControl;
   useEffect(() => {
     const onMsg = (e) => e.data?.type === "open-bot" && e.data.botId && select(e.data.botId);
     navigator.serviceWorker?.addEventListener("message", onMsg);
@@ -2317,9 +2587,9 @@ function Shell() {
     <${ChatView} st=${st} bot=${bot} onMenu=${() => setSidebar(true)} panel=${panel} setPanel=${setPanel} onSheet=${setSheet} onImage=${setLightbox} setControl=${setControl} />
     ${panel ? html`<${Panel} tab=${panel} setTab=${setPanel} bot=${bot} onClose=${() => setPanel(null)} onImage=${setLightbox} control=${control} setControl=${setControl} />` : null}
     ${sheet?.type === "routines" ? html`<${RoutinesSheet} st=${st} botId=${bot.id} onClose=${() => setSheet(null)} />` : null}
-    ${sheet?.type === "skills" ? html`<${SkillsSheet} setControl=${setControl} botId=${bot.id} onClose=${() => setSheet(null)} />` : null}
+    ${sheet?.type === "skills" ? html`<${SkillsSheet} setControl=${setControl} botId=${bot.id} initial=${sheet.open} onClose=${() => setSheet(null)} />` : null}
     ${sheet?.type === "activity" ? html`<${ActivitySheet} onClose=${() => setSheet(null)} />` : null}
-    ${sheet?.type === "settings" ? html`<${SettingsSheet} st=${st} onClose=${() => setSheet(null)} />` : null}
+    ${sheet?.type === "settings" ? html`<${SettingsSheet} st=${st} focus=${sheet.focus} onClose=${() => setSheet(null)} />` : null}
     ${sheet?.type === "newbot" ? html`<${NewBotSheet} onClose=${() => setSheet(null)} onCreated=${(id, custom) => loadState().then(() => { select(id); if (custom) setSheet({ type: "style" }); })} />` : null}
     ${sheet?.type === "bot" && !bot.group ? html`<${BotSheet} bot=${bot} st=${st} onClose=${() => setSheet(null)} onStyle=${() => setSheet({ type: "style" })} />` : null}
     ${sheet?.type === "bot" && bot.group ? html`<${GroupSheet} st=${st} group=${bot.group} onClose=${() => setSheet(null)} onDeleted=${() => { setSheet(null); select(st.activeBotId); }} />` : null}

@@ -104,6 +104,33 @@ export function fireWebhook(token: string, body: string) {
   return true;
 }
 
+const DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+const clock = (h: number, m: number) => `${h % 12 || 12}:${String(m).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`;
+const nth = (n: number) => `${n}${n % 10 === 1 && n !== 11 ? "st" : n % 10 === 2 && n !== 12 ? "nd" : n % 10 === 3 && n !== 13 ? "rd" : "th"}`;
+
+/** A schedule in words: "0 8 * * 1-5" → "Weekdays at 8:00 AM". Anything unusual is shown as written. */
+export function describeSchedule(schedule: string) {
+  const s = schedule.trim();
+  if (/^\d{4}-\d{2}-\d{2}T/.test(s)) {
+    const d = new Date(s);
+    return isNaN(d.getTime()) ? s : `Once, ${d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`;
+  }
+  const f = s.split(/\s+/);
+  if (f.length !== 5) return s;
+  const [min, hour, dom, mon, dow] = f as [string, string, string, string, string];
+  const every = /^\*\/(\d+)$/;
+  if (every.test(min) && hour === "*" && dom === "*" && mon === "*" && dow === "*") return `Every ${every.exec(min)![1]} minutes`;
+  if (/^\d+$/.test(min) && every.test(hour) && dom === "*" && mon === "*" && dow === "*") return `Every ${every.exec(hour)![1]} hours`;
+  if (!/^\d+$/.test(min) || !/^\d+$/.test(hour) || mon !== "*") return s;
+  const at = clock(Number(hour), Number(min));
+  if (dom === "*" && dow === "*") return `Every day at ${at}`;
+  if (dom === "*" && dow === "1-5") return `Weekdays at ${at}`;
+  if (dom === "*" && /^(0,6|6,0)$/.test(dow)) return `Weekends at ${at}`;
+  if (dom === "*" && /^[0-7](,[0-7])*$/.test(dow)) return `Every ${dow.split(",").map((d) => DAYS[Number(d) % 7]).join(" and ")} at ${at}`;
+  if (/^\d+$/.test(dom) && dow === "*") return `Monthly on the ${nth(Number(dom))} at ${at}`;
+  return s;
+}
+
 export function describeTrigger(t: RoutineTrigger) {
   if (t.kind === "webhook") return `when its link is called (/hook/${t.token})`;
   if (t.kind === "folder") return `when a new file appears in ${t.path}`;

@@ -44,6 +44,7 @@ export type RunRecord = {
   at: string;
   bot: string;
   label: string;
+  routineId?: string;
   status: "done" | "failed" | "stopped" | "nothing new";
   costUsd: number;
   seconds: number;
@@ -75,7 +76,9 @@ type State = {
   /** What the Mac access check found working (background runs only use these, so they never trigger a prompt). */
   macAccess?: { calendar?: boolean; reminders?: boolean; contacts?: boolean; mail?: boolean; at?: string };
   lastProactiveDay?: string;
-  skillOffers?: string[]; // requests Blip already offered to turn into a skill (not offered again)
+  skillOffers?: string[];
+  skillUse?: Record<string, { at: string; count: number }>; // when each skill was last used
+  lastProactiveAt?: string; // the last check-in (for the app's status strip) // requests Blip already offered to turn into a skill (not offered again)
   groups: Group[];
   groupSessions: Record<string, string>; // "<groupId>:<botId>" → that bot's conversation in that group
   email?: import("./email.js").EmailSettings; // the agent's own email address (password in the Keychain)

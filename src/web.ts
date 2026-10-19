@@ -12,7 +12,7 @@ import {
 import { answerCard, pendingCards } from "./cards.js";
 import { config, setAnthropicKey } from "./config.js";
 import {
-  createBotFromTemplate, freshChat, giveFeedback, handleUserMessage, runProactive, runningIn, runtime, setupRoutineTemplate, stopCurrent, testRoutine, type Attachment,
+  createBotFromTemplate, freshChat, runSkillPrompt, giveFeedback, handleUserMessage, runProactive, runningIn, runtime, setupRoutineTemplate, stopCurrent, testRoutine, type Attachment,
 } from "./core.js";
 import { deleteThread, events, getThread, stateChanged, type Msg } from "./hub.js";
 import * as mac from "./mac.js";
@@ -31,7 +31,7 @@ const inputError = (error: unknown) =>
     : (error as Error).message;
 import { addSubscription, pushPublicKey } from "./notify.js";
 import { addRule, describeRule, inside, isSensitive } from "./permissions.js";
-import { describeTrigger, fireWebhook, nextRun, removeRoutine } from "./routines.js";
+import { describeSchedule, describeTrigger, fireWebhook, nextRun, removeRoutine } from "./routines.js";
 import { recentAudit, save, spendByBotToday, spentLastDays, spentToday, state } from "./store.js";
 import { saveToInbox } from "./telegram.js";
 import { BOT_TEMPLATES, ROUTINE_TEMPLATES } from "./templates.js";
@@ -137,12 +137,30 @@ function appState() {
     pushKey: pushPublicKey,
     authMode: config.anthropicKey ? "api" : "plan",
     teach: teachStatus(),
+    lastCheckIn: state.lastProactiveAt ?? null,
+    nextRoutine: nextRoutine(),
     groups: state.groups.map((g) => ({
       ...g,
       running: rt.running.some((r) => g.members.includes(r.botId) && runningIn(r.botId) === g.id),
       waiting: pendingCards(g.id),
     })),
   };
+}
+
+/** The routine that runs next on the clock (for the status strip). */
+function nextRoutine() {
+  let best: { name: string; botId: string; at: string } | null = null;
+  for (const r of state.routines) {
+    const at = nextRun(r.id);
+    if (at && (!best || at.toISOString() < best.at)) best = { name: r.name, botId: r.botId, at: at.toISOString() };
+  }
+  return best;
+}
+
+/** A routine's latest run (its own or a test run): when, and whether it worked. */
+function lastRunOf(r: { id: string; name: string }) {
+  const run = state.runs.findLast((x) => x.routineId === r.id || (!x.routineId && (x.label === r.name || x.label === `Test · ${r.name}`)));
+  return run ? { at: run.at, status: run.status, summary: run.summary.slice(0, 140) } : null;
 }
 
 function recentFiles(limit: number) {
@@ -502,6 +520,8 @@ export function startWeb() {
         next: nextRun(r.id)?.toISOString() ?? null,
         when: r.trigger ? describeTrigger(r.trigger).replace(/ \(\/hook\/.*\)$/, "") : null,
         hook: r.trigger?.kind === "webhook" ? `/hook/${r.trigger.token}` : null,
+        lastRun: lastRunOf(r),
+        scheduleText: r.trigger ? null : describeSchedule(r.schedule),
       })),
     ),
   );
@@ -513,7 +533,7 @@ export function startWeb() {
   });
   api.get("/templates", (_req, res) => void res.json({ routines: ROUTINE_TEMPLATES, bots: BOT_TEMPLATES }));
   api.post("/templates/routine", (req, res) => void res.json({ ok: setupRoutineTemplate(str(req.body.key), str(req.body.botId) || undefined) }));
-  api.get("/skills", (_req, res) => void res.json(listSkills()));
+  api.get("/skills", (_req, res) => void res.json(skills.skillsOverview(listSkills())));
   // Skills are plain Markdown the user can read, edit, version, export and import.
   const guard = (fn: (req: Request, res: Response) => void) => (req: Request, res: Response) => {
     try {
@@ -568,7 +588,9 @@ export function startWeb() {
     }
   });
   api.post("/skills/:name/run", (req, res) => {
-    handleUserMessage(`Use the "${String(req.params.name)}" skill now. Ask me for anything it needs that you don't know.`, { botId: str(req.body.botId) || undefined, source: "app" });
+    const name = String(req.params.name);
+    if (!/^[\w-][\w.-]*$/.test(name)) return void res.status(400).json({ error: "bad skill name" });
+    handleUserMessage(runSkillPrompt(name), { botId: str(req.body.botId) || undefined, source: "app" });
     res.json({ ok: true });
   });
   api.delete("/skills/:name", (req, res) => {

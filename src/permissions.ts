@@ -415,7 +415,7 @@ function decider(ctx: RunContext): Decide {
     if (ctx.readOnly) {
       if (READ_ONLY_SAFE.has(toolName) || connectorReadOnly) return allow("auto (read-only run)");
       if (target && READ_TOOLS.has(toolName) && !isSensitive(target, { searchesFolder })) return allow("auto (read-only run)");
-      return deny("This is a read-only check-in. Don't change anything; suggest it with the suggest tool instead.");
+      return deny("This run is read-only: look, but don't change anything. Shell commands aren't available; use Read, Glob and Grep for files. In a check-in, offer changes with the suggest tool.");
     }
 
     // 2. Cards that always involve the user.

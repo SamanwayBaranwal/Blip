@@ -24,6 +24,10 @@ const Verdict = z.object({
   reason: z.string().describe("One short sentence the user will read on their phone"),
 });
 export type ReviewResult = z.infer<typeof Verdict>;
+// zod stamps "$schema: draft 2020-12" on its output, which the engine's validator rejects ("not a valid JSON
+// Schema"), and every review then fell back to asking. The schema itself is plain; only the stamp goes.
+const { $schema: _draft, ...VERDICT_SCHEMA } = z.toJSONSchema(Verdict) as Record<string, unknown>;
+export const verdictSchema = () => VERDICT_SCHEMA;
 
 const POLICY = `You are Auto Review, a security reviewer for a personal AI agent that controls its owner's Mac, browser and accounts.
 You see what the owner asked for and one action the agent wants to take next. Decide:
@@ -64,7 +68,7 @@ async function planReview(content: string, abort: AbortController): Promise<Revi
       tools: [],
       cwd: os.tmpdir(),
       abortController: abort,
-      outputFormat: { type: "json_schema", schema: z.toJSONSchema(Verdict) as Record<string, unknown> },
+      outputFormat: { type: "json_schema", schema: VERDICT_SCHEMA },
       canUseTool: async () => ({ behavior: "deny", message: "No tools during review." }),
       env: Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^CLAUDE|^ANTHROPIC_(API_KEY|AUTH_TOKEN|BASE_URL)$/.test(k))),
     },

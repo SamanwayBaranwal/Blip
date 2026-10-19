@@ -47,6 +47,13 @@ Want to add a skill, a tool or a connector? See [CONTRIBUTING.md](CONTRIBUTING.m
 - **Talk mode**: a hands-free conversation (it listens, answers out loud and listens again), or hold the mic to send a voice message. Speech is turned into text on the Mac itself.
 - **Double-checks its work**: after a task that changes files, your calendar, reminders, routines or skills, an independent checker confirms it really happened.
 - **Skills you can share**: export or import any skill as one `.md` file, every edit keeps the old version, and a library of examples comes with Blip. When you ask for the same thing three times, Blip offers to save it as a skill.
+- **Always clear what's happening**:
+  - A status line under the input says what the bot is doing: listening, thinking, the current step, running a routine, waiting for you, speaking.
+  - A strip at the top shows every running task, anything waiting for you, the next routine and the last check-in.
+  - Suggestions and failed checks wait in a tray at the top of the chat, one tap each.
+  - Files, events, reminders, skills and routines a task made show as chips on the task, with a short confirmation.
+  - Type "/" for commands and skills.
+  - Android and desktop notifications have Allow / Deny buttons.
 - **Looks after itself**:
   - a nightly backup and a nightly self-test that reports in one quiet line
   - Recover and Reset buttons
