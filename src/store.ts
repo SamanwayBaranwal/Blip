@@ -6,10 +6,16 @@ export type Routine = {
   id: string;
   botId: string;
   name: string;
-  schedule: string; // cron ("0 8 * * *") or one-time ISO date ("2026-10-18T09:00:00")
+  schedule: string; // cron ("0 8 * * *"), one-time ISO date ("2026-10-18T09:00:00"), or "event" (see trigger)
+  trigger?: RoutineTrigger; // event routines: started by something happening instead of the clock
   prompt: string;
   createdAt: string;
 };
+
+export type RoutineTrigger =
+  | { kind: "webhook"; token: string } // a private URL anything on your network can call (Shortcuts, scripts)
+  | { kind: "folder"; path: string } // a new file appears in this folder
+  | { kind: "mail"; from?: string; subject?: string }; // a new email in Mail.app matches
 
 export type BotProfile = {
   id: string;
@@ -20,6 +26,8 @@ export type BotProfile = {
   model?: string; // per-bot model choice; falls back to MODEL in .env
   look?: BlipLook; // how this bot's Blip is dressed (avatar customization)
   quiet?: boolean; // deliver this bot's messages silently (no sound)
+  spice?: "low" | "medium" | "high";
+  ownBrowser?: boolean; // its own Chrome (logins copied from the shared one), so it browses in parallel // how much personality: low = professional, medium (default), high = playful
   sessionId?: string;
   contextTokens?: number; // size of the current conversation, for the context meter
   createdAt: string;
@@ -59,7 +67,11 @@ type State = {
   rules: Rule[];
   routines: Routine[];
   connectors: Record<string, Connector>;
-  settings: { autoReview: boolean; proactive: boolean; voiceReplies: boolean; fullAccess: boolean };
+  settings: { autoReview: boolean; proactive: boolean; proactiveMode: "morning" | "thrice"; voiceReplies: boolean; fullAccess: boolean; verify: boolean; healthcheckUrl?: string };
+  /** What the Mac access check found working (background runs only use these, so they never trigger a prompt). */
+  macAccess?: { calendar?: boolean; reminders?: boolean; contacts?: boolean; mail?: boolean; at?: string };
+  lastProactiveDay?: string;
+  skillOffers?: string[]; // requests Blip already offered to turn into a skill (not offered again)
   recentSuggestions: string[];
   dismissedSuggestions: string[];
   suggestionsByDay: Record<string, number>;
@@ -70,6 +82,10 @@ type State = {
   sessionTotals: Record<string, number>;
   /** Names of secrets in the Keychain (the values are never stored here). */
   secrets: { name: string; note: string; createdAt: string; lastUsedAt?: string }[];
+  health: {
+    lastBackup?: { at: string; file: string; bytes: number; ok: boolean; error?: string };
+    lastSelfTest?: { at: string; passed: number; total: number; failures: string[] };
+  };
 };
 
 const STATE_FILE = path.join(config.dataDir, "state.json");
@@ -81,7 +97,7 @@ function load(): State {
     rules: [],
     routines: [],
     connectors: {},
-    settings: { autoReview: true, proactive: true, voiceReplies: false, fullAccess: false },
+    settings: { autoReview: true, proactive: true, proactiveMode: "thrice", voiceReplies: false, fullAccess: false, verify: true },
     recentSuggestions: [],
     dismissedSuggestions: [],
     suggestionsByDay: {},
@@ -91,6 +107,7 @@ function load(): State {
     spendByDay: {},
     sessionTotals: {},
     secrets: [],
+    health: {},
   };
   if (!fs.existsSync(STATE_FILE)) return empty;
   try {

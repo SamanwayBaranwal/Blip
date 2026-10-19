@@ -3,11 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { query, type McpServerConfig, type Options, type Query, type SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
-import { personaFor, teamAgents } from "./bots.js";
+import { browserProfileFor, personaFor, teamAgents } from "./bots.js";
 import { config } from "./config.js";
 import { setEngines } from "./computer.js";
 import { makeCanUseTool, makeSecretGate, type RunContext } from "./permissions.js";
 import { scrub } from "./secrets.js";
+import { finishReplay, replaySetup } from "./replay.js";
 import { recordCost, spentToday, state, type BotProfile } from "./store.js";
 import { createBlipServer } from "./tools.js";
 
@@ -41,7 +42,7 @@ class Inbox {
 export type AgentHandle = {
   /** Send a new message into the running task. Returns false if the task already finished. */
   steer: (text: string) => boolean;
-  done: Promise<{ sessionId?: string; failed: boolean; costUsd: number }>;
+  done: Promise<{ sessionId?: string; failed: boolean; costUsd: number; tools?: string[] }>;
 };
 
 export const MODEL_ALIASES: Record<string, string> = {
@@ -60,14 +61,17 @@ function connectorServers(): Record<string, McpServerConfig> {
   return servers;
 }
 
-type TurnResult = { sessionId?: string; failed: boolean; costUsd: number };
+type TurnResult = { sessionId?: string; failed: boolean; costUsd: number; tools?: string[] };
 type Turn = {
   onStep?: (step: string) => void;
+  onPartial?: (text: string) => void;
   onPlan?: (todos: Todo[]) => void;
   onReply: (text: string, isError: boolean, costSoFarUsd: number) => Promise<void>;
   cost: number;
   failed: boolean;
   lastText: string;
+  tools: Set<string>; // every tool the bot used in this task (for the double-check)
+  runMsgId?: string; // the task's progress block in the chat (a replay gets linked from it)
   resolve: (r: TurnResult) => void;
   reject: (e: unknown) => void;
   userAbort: AbortSignal;
@@ -94,6 +98,8 @@ class Session {
   /** Close as soon as the current task finishes (its settings changed, or New chat). */
   retiring = false;
   private turnSent = false;
+  private partial = ""; // the reply text being written right now (streamed to the app)
+  private readonly replayTargets: { botId: string; msgId: string }[] = []; // tasks that used the browser
   lastUsed = Date.now();
   private idleTimer?: NodeJS.Timeout;
 
@@ -104,6 +110,7 @@ class Session {
     resume: string | undefined,
     remainingBudget: number | undefined,
     model: string,
+    readonly userStarted: boolean,
   ) {
     this.model = model;
     this.sessionId = resume;
@@ -117,11 +124,15 @@ class Session {
     );
     if (config.anthropicKey) env.ANTHROPIC_API_KEY = config.anthropicKey;
     const secretGate = makeSecretGate(this.ctx);
+    // Work replay: the browser records this session; when it ends, the clip is linked from the tasks that browsed.
+    const replay = replaySetup(`${bot.id}-${Date.now()}`);
+    void this.exited.then(() => finishReplay(replay.videoDir, replay.configFile, this.replayTargets));
     const options: Options = {
       model,
       effort: config.effort,
       cwd: config.workspace,
       permissionMode: "default",
+      includePartialMessages: true, // stream the reply to the app as it's written
       settingSources: ["project"], // loads workspace/CLAUDE.md and skills; ignores this Mac's personal Claude Code settings
       systemPrompt: { type: "preset", preset: "claude_code", append: personaFor(bot, { readOnly }) },
       agents: readOnly ? undefined : teamAgents(bot),
@@ -132,12 +143,13 @@ class Session {
       env,
       mcpServers: {
         ...connectorServers(),
-        blip: createBlipServer(bot),
+        blip: createBlipServer(bot, { background: !userStarted }), // chats the user starts may ask macOS; background runs never
         browser: {
           type: "stdio",
           command: process.execPath,
           args: [
-            config.playwrightCli, "--browser", "chrome", "--user-data-dir", config.browserProfile, "--output-dir", `${config.workspace}/browser`,
+            config.playwrightCli, "--browser", "chrome", "--user-data-dir", browserProfileFor(bot), "--output-dir", `${config.workspace}/browser`,
+            "--config", replay.configFile,
             // Background work (check-ins, routines) uses an invisible browser so windows never pop up while you
             // use the Mac; chats you start use a visible one you can watch. BLIP_BROWSER_HEADLESS hides it always.
             ...(!keepWarm || process.env.BLIP_BROWSER_HEADLESS ? ["--headless"] : []),
@@ -189,9 +201,9 @@ class Session {
   async runTurn(
     prompt: Content,
     request: string,
-    handlers: Pick<Turn, "onStep" | "onPlan" | "onReply">,
+    handlers: Pick<Turn, "onStep" | "onPlan" | "onReply" | "onPartial">,
     userAbort: AbortSignal,
-    run: { runId: string; model: string; onWait?: (holder: string | null) => void },
+    run: { runId: string; model: string; onWait?: (holder: string | null) => void; runMsgId?: string },
   ): Promise<TurnResult> {
     clearTimeout(this.idleTimer);
     if (!this.alive) throw new Error("This bot's engine closed before it could start. Please send your message again.");
@@ -203,7 +215,7 @@ class Session {
     this.turnSent = false;
     // The turn exists (so the session counts as busy and nothing closes it) before any waiting below.
     const result = new Promise<TurnResult>((resolve, reject) => {
-      this.turn = { ...handlers, cost: 0, failed: false, lastText: "", resolve, reject, userAbort };
+      this.turn = { ...handlers, cost: 0, failed: false, lastText: "", tools: new Set(), runMsgId: run.runMsgId, resolve, reject, userAbort };
     });
     // Smart model choice: the same warm engine can switch models between messages.
     if (run.model !== this.model && this.q) {
@@ -259,6 +271,18 @@ class Session {
         const turn = this.turn;
         if (message.type === "system" && message.subtype === "init") {
           this.sessionId = message.session_id;
+        } else if (message.type === "stream_event") {
+          // Only the bot's own words (not a teammate's), shown as they're written.
+          if (!turn || message.parent_tool_use_id !== null) continue;
+          const ev = message.event;
+          if (ev.type === "message_start") this.partial = "";
+          else if (ev.type === "content_block_start" && ev.content_block.type === "tool_use") {
+            this.partial = ""; // text before a tool call was thinking aloud; the step timeline covers it
+            turn.onPartial?.("");
+          } else if (ev.type === "content_block_delta" && ev.delta.type === "text_delta") {
+            this.partial += ev.delta.text;
+            turn.onPartial?.(this.partial);
+          }
         } else if (message.type === "assistant" && turn) {
           // The latest call's prompt size is how long the conversation is now (the result's usage adds up every step).
           const u = message.parent_tool_use_id === null ? message.message.usage : undefined;
@@ -269,6 +293,10 @@ class Session {
             const input = block.input as Record<string, unknown>;
             if (block.name === "TodoWrite" && Array.isArray(input.todos)) turn.onPlan?.(input.todos as Todo[]);
             else turn.onStep?.(stepLabel(block.name, input, message.parent_tool_use_id !== null));
+            turn.tools.add(block.name);
+            if (block.name.startsWith("mcp__browser__") && turn.runMsgId && !this.replayTargets.some((t) => t.msgId === turn.runMsgId)) {
+              this.replayTargets.push({ botId: this.bot.id, msgId: turn.runMsgId });
+            }
           }
         } else if (message.type === "result") {
           this.sessionId = message.session_id;
@@ -292,7 +320,7 @@ class Session {
             await turn.onReply(`${turn.lastText}\n\nStopped early: ${reason}`.trim(), true, turn.cost);
           }
           turn.lastText = "";
-          if (!this.outstanding.length) this.finishTurn({ sessionId: this.sessionId, failed: turn.failed, costUsd: turn.cost });
+          if (!this.outstanding.length) this.finishTurn({ sessionId: this.sessionId, failed: turn.failed, costUsd: turn.cost, tools: [...turn.tools] });
         }
       }
       // The engine ended on its own (closed while idle, or it exited after answering).
@@ -344,6 +372,19 @@ export function closeWarmSession(botId?: string) {
   }
 }
 
+/** For the health check: how many engines are running and how many are mid-task. */
+export function engineStats() {
+  const all = [...live];
+  return { running: all.length, warm: sessions.size, busy: all.filter((s) => s.busy).length };
+}
+
+/** Recover: stops every engine at once (tasks were already stopped) and waits for them to exit. */
+export async function closeAllEngines() {
+  const all = [...live];
+  for (const s of all) s.close(true);
+  await Promise.race([Promise.all(all.map((s) => s.exited)), new Promise((r) => setTimeout(r, 8000))]);
+}
+
 /** Closes a bot's engines and waits (briefly) until they have exited, so their Chrome window is gone. */
 export async function closeEngineAndWait(botId: string, onlyWithBrowser = false) {
   const mine = [...live].filter((s) => s.bot.id === botId && (!onlyWithBrowser || s.ctx.usedComputer));
@@ -388,6 +429,8 @@ export function startAgent(params: {
   onPlan?: (todos: Todo[]) => void;
   onWait?: (holder: string | null) => void;
   onReply: (text: string, isError: boolean, costSoFarUsd: number) => Promise<void>;
+  onPartial?: (text: string) => void;
+  runMsgId?: string;
 }): AgentHandle {
   let session: Session | undefined;
   const done = (async (): Promise<TurnResult> => {
@@ -415,10 +458,10 @@ export function startAgent(params: {
         console.error(`[${params.bot.name}] conversation ${resume} no longer exists; starting a fresh one (memory is kept)`);
         resume = undefined;
       }
-      session = new Session(params.bot, keepWarm, !!params.readOnly, resume, usingKey ? remaining : undefined, params.model);
+      session = new Session(params.bot, keepWarm, !!params.readOnly, resume, usingKey ? remaining : undefined, params.model, !!params.keepWarm && !params.readOnly);
       if (keepWarm) sessions.set(params.bot.id, session);
     }
-    return session.runTurn(params.prompt, params.request, params, params.abort.signal, { runId: params.runId, model: params.model, onWait: params.onWait });
+    return session.runTurn(params.prompt, params.request, params, params.abort.signal, { runId: params.runId, model: params.model, onWait: params.onWait, runMsgId: params.runMsgId });
   })();
 
   return {

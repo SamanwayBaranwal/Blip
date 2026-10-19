@@ -5,6 +5,8 @@ import { config } from "./config.js";
 import { stopCurrent, welcome } from "./core.js";
 import { startRoutines } from "./routines.js";
 import { loadSecrets } from "./secrets.js";
+import { startMemoryIndex } from "./memory.js";
+import { buildHelper } from "./native.js";
 import { save, state } from "./store.js";
 import { startTelegram } from "./telegram-app.js";
 import { bot as telegram } from "./telegram.js";
@@ -15,6 +17,8 @@ const sharedNotes = path.join(config.workspace, "CLAUDE.md");
 if (!fs.existsSync(sharedNotes)) fs.writeFileSync(sharedNotes, "# Shared notes about the user\n\n## About the user\n");
 
 startRoutines();
+startMemoryIndex();
+void buildHelper("macdata", "blip-macdata"); // Calendar, Reminders and Contacts (built once, in the background)
 void loadSecrets().catch((error) => console.error("Couldn't load secrets from the Keychain:", error));
 startWeb();
 await startTelegram().catch((error) => console.error("Telegram failed to start (the app still works):", error));
@@ -37,7 +41,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
 // Screenshots and browser output only matter for a while; clear anything older than a week, daily.
 function pruneOldFiles() {
   const cutoff = Date.now() - 7 * 86_400_000;
-  for (const dir of [path.join(config.workspace, "browser"), path.join(config.workspace, "screenshots"), path.join(config.dataDir, "voice")]) {
+  for (const dir of [path.join(config.workspace, "browser"), path.join(config.workspace, "screenshots"), path.join(config.workspace, "replays"), path.join(config.dataDir, "voice")]) {
     try {
       for (const name of fs.readdirSync(dir)) {
         const file = path.join(dir, name);
@@ -56,7 +60,7 @@ setInterval(pruneOldFiles, 24 * 3_600_000).unref();
 console.log(`Ready. Bots: ${state.bots.map((b) => b.name).join(", ")}. Model ${config.model}. App: http://localhost:${config.webPort} (sign-in link: ./blip.sh link)`);
 
 // The service log grows forever otherwise. launchd appends to it, so trimming it in place is safe.
-const LOG_FILE = path.join(config.dataDir, "..", "logs", "blip.log");
+const LOG_FILE = path.join(config.logsDir, "blip.log");
 setInterval(() => {
   try {
     const size = fs.statSync(LOG_FILE).size;

@@ -10,3 +10,4 @@ dist-mac/
 
 # Built on each Mac (remote-control input helper)
 bin/
+restore-safety-*/

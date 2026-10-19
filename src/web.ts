@@ -12,13 +12,16 @@ import {
 import { answerCard, pendingCards } from "./cards.js";
 import { config, setAnthropicKey } from "./config.js";
 import {
-  createBotFromTemplate, freshChat, giveFeedback, handleUserMessage, runtime, setupRoutineTemplate, stopCurrent, testRoutine, type Attachment,
+  createBotFromTemplate, freshChat, giveFeedback, handleUserMessage, runProactive, runtime, setupRoutineTemplate, stopCurrent, testRoutine, type Attachment,
 } from "./core.js";
 import { deleteThread, events, getThread, stateChanged, type Msg } from "./hub.js";
 import * as mac from "./mac.js";
 import * as screen from "./screen.js";
 import { attachRemote } from "./remote.js";
 import { deleteSecret, listSecrets, saveSecret } from "./secrets.js";
+import { backupNow, beat, checkMacAccess, health, recover, reset, selfTest } from "./health.js";
+import { startTeaching, stopTeaching, teachStatus } from "./teach.js";
+import * as skills from "./skills.js";
 
 /** Input failing almost always means macOS hasn't given Blip permission to control the Mac. */
 const inputError = (error: unknown) =>
@@ -27,7 +30,7 @@ const inputError = (error: unknown) =>
     : (error as Error).message;
 import { addSubscription, pushPublicKey } from "./notify.js";
 import { addRule, describeRule, inside, isSensitive } from "./permissions.js";
-import { nextRun, removeRoutine } from "./routines.js";
+import { describeTrigger, fireWebhook, nextRun, removeRoutine } from "./routines.js";
 import { recentAudit, save, spendByBotToday, spentLastDays, spentToday, state } from "./store.js";
 import { saveToInbox } from "./telegram.js";
 import { BOT_TEMPLATES, ROUTINE_TEMPLATES } from "./templates.js";
@@ -116,7 +119,7 @@ function appState() {
   const rt = runtime();
   return {
     bots: state.bots.map((b) => ({
-      id: b.id, name: b.name, emoji: b.emoji, job: b.job, style: b.style, quiet: !!b.quiet, look: b.look ?? {},
+      id: b.id, name: b.name, emoji: b.emoji, job: b.job, style: b.style, quiet: !!b.quiet, look: b.look ?? {}, spice: b.spice ?? "medium", ownBrowser: !!b.ownBrowser,
       model: b.model ?? "auto", contextTokens: b.contextTokens ?? 0, spentToday: byBot[b.name] ?? 0,
       running: rt.running.some((r) => r.botId === b.id), step: rt.running.find((r) => r.botId === b.id)?.step ?? null,
       waiting: pendingCards(b.id), queued: rt.queued.filter((q) => q.botId === b.id).length,
@@ -132,6 +135,7 @@ function appState() {
     telegram: !!config.telegramToken,
     pushKey: pushPublicKey,
     authMode: config.anthropicKey ? "api" : "plan",
+    teach: teachStatus(),
   };
 }
 
@@ -201,6 +205,26 @@ export function startWeb() {
   });
   app.use(express.static(config.webDir, { index: "index.html", maxAge: 0 }));
 
+  // Webhook triggers: a private link per routine (the token is the password). Anything on your network or
+  // Tailscale can call it (iPhone Shortcuts, scripts, other apps). The body is passed to the bot as data.
+  const hookLimit = new Map<string, number>();
+  app.all("/hook/:token", express.text({ type: "*/*", limit: "64kb" }), (req, res) => {
+    const token = String(req.params.token);
+    if (Date.now() - (hookLimit.get(token) ?? 0) < 10_000) return void res.status(429).json({ error: "Too many calls; wait a few seconds." });
+    hookLimit.set(token, Date.now());
+    const body = typeof req.body === "string" ? req.body : req.body && Object.keys(req.body).length ? JSON.stringify(req.body) : "";
+    const query = new URLSearchParams(req.query as Record<string, string>).toString();
+    if (!fireWebhook(token, [query && `query: ${query}`, body].filter(Boolean).join("\n"))) return void res.status(404).json({ error: "No routine has that link." });
+    res.status(202).json({ ok: true });
+  });
+
+  // A one-line status anyone on your network can open (no sign-in, no personal data): is Blip up?
+  app.get("/status", (_req, res) => {
+    const t = state.health.lastSelfTest;
+    const up = Math.round(process.uptime() / 60);
+    res.type("text/plain").send(`Blip is running · up ${up >= 60 ? `${Math.floor(up / 60)}h ${up % 60}m` : `${up}m`}${t ? ` · self-test ${t.passed}/${t.total}` : ""}\n`);
+  });
+
   app.post("/api/login", (req, res) => {
     if (!matches(req.body?.code) && !pinMatches(req.body?.code)) return void res.status(401).json({ error: "wrong code" });
     setSession(req, res);
@@ -216,6 +240,25 @@ export function startWeb() {
   });
 
   api.get("/state", (_req, res) => void res.json(appState()));
+
+  // ---- health: report, Recover, Reset, backups, self-test
+  api.get("/health", async (_req, res) => void res.json(await health()));
+  api.post("/recover", async (_req, res) => void res.json({ steps: await recover() }));
+  api.post("/reset", async (req, res) => {
+    if (req.body?.confirm !== "RESET") return void res.status(400).json({ error: "Confirm the reset first." });
+    res.json({ steps: await reset() });
+  });
+  api.post("/backup", async (_req, res) => void res.json(await backupNow()));
+  api.post("/selftest", async (_req, res) => void res.json(await selfTest({ post: true })));
+  api.post("/check-mac", async (_req, res) => void res.json(await checkMacAccess()));
+  api.post("/heartbeat", async (req, res) => {
+    const url = str(req.body.url, 300).trim();
+    if (url && !/^https:\/\/[^\s]+$/.test(url)) return void res.status(400).json({ error: "Paste the https:// ping link your monitor gave you." });
+    state.settings.healthcheckUrl = url || undefined;
+    save();
+    res.json(url ? await beat() : { ok: true, cleared: true });
+  });
+  api.post("/proactive/run", async (_req, res) => void res.json({ started: await runProactive({ now: true }) }));
   // Connect Claude from the app: checks the key with a tiny request, then saves it to .env.
   api.post("/setup/key", async (req, res) => {
     const key = str(req.body.key, 300).trim();
@@ -304,8 +347,10 @@ export function startWeb() {
     if (req.body.emoji) b.emoji = str(req.body.emoji, 8);
     if (req.body.model !== undefined) b.model = req.body.model && req.body.model !== "auto" ? MODEL_ALIASES[str(req.body.model)] ?? str(req.body.model, 60) : undefined;
     if (req.body.quiet !== undefined) b.quiet = !!req.body.quiet;
+    if (["low", "medium", "high"].includes(req.body.spice)) b.spice = req.body.spice;
+    if (req.body.ownBrowser !== undefined) b.ownBrowser = !!req.body.ownBrowser;
     if (req.body.look && typeof req.body.look === "object") b.look = cleanLook(req.body.look);
-    if (req.body.name || req.body.job || req.body.style !== undefined || req.body.model !== undefined) closeWarmSession(b.id); // pick up the new settings
+    if (req.body.name || req.body.job || req.body.style !== undefined || req.body.model !== undefined || req.body.spice || req.body.ownBrowser !== undefined) closeWarmSession(b.id); // pick up the new settings
     if (req.body.active) state.activeBotId = b.id;
     if (req.body.primary) state.primaryBotId = b.id;
     save();
@@ -352,7 +397,13 @@ export function startWeb() {
   // ---- routines, templates, skills
   api.get("/routines", (_req, res) =>
     void res.json(
-      state.routines.map((r) => ({ ...r, bot: getBot(r.botId)?.name ?? "?", next: nextRun(r.id)?.toISOString() ?? null })),
+      state.routines.map((r) => ({
+        ...r,
+        bot: getBot(r.botId)?.name ?? "?",
+        next: nextRun(r.id)?.toISOString() ?? null,
+        when: r.trigger ? describeTrigger(r.trigger).replace(/ \(\/hook\/.*\)$/, "") : null,
+        hook: r.trigger?.kind === "webhook" ? `/hook/${r.trigger.token}` : null,
+      })),
     ),
   );
   api.post("/routines/:id/run", (req, res) => void res.json({ ok: testRoutine(String(req.params.id)) }));
@@ -364,6 +415,59 @@ export function startWeb() {
   api.get("/templates", (_req, res) => void res.json({ routines: ROUTINE_TEMPLATES, bots: BOT_TEMPLATES }));
   api.post("/templates/routine", (req, res) => void res.json({ ok: setupRoutineTemplate(str(req.body.key), str(req.body.botId) || undefined) }));
   api.get("/skills", (_req, res) => void res.json(listSkills()));
+  // Skills are plain Markdown the user can read, edit, version, export and import.
+  const guard = (fn: (req: Request, res: Response) => void) => (req: Request, res: Response) => {
+    try {
+      fn(req, res);
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  };
+  api.get("/skills/library", (_req, res) => void res.json(skills.libraryList()));
+  api.post("/skills/library/:name", guard((req, res) => void res.json({ name: skills.addFromLibrary(String(req.params.name)) })));
+  api.post("/skills/import", guard((req, res) => {
+    const text = req.body.data ? Buffer.from(str(req.body.data, 400_000), "base64").toString("utf8") : str(req.body.text, 200_000);
+    res.json({ name: skills.importSkill(text, str(req.body.fileName, 120)) });
+  }));
+  api.get("/skills/:name", guard((req, res) => {
+    const file = skills.skillPath(String(req.params.name));
+    if (!fs.existsSync(file)) return void res.status(404).json({ error: "No such skill." });
+    res.json({ name: req.params.name, text: fs.readFileSync(file, "utf8"), versions: skills.skillVersions(String(req.params.name)) });
+  }));
+  api.get("/skills/:name/export", guard((req, res) => {
+    const file = skills.skillPath(String(req.params.name));
+    if (!fs.existsSync(file)) return void res.sendStatus(404);
+    res.attachment(`${req.params.name}.skill.md`).type("text/markdown").send(fs.readFileSync(file, "utf8"));
+  }));
+  api.put("/skills/:name", guard((req, res) => {
+    const name = String(req.params.name);
+    if (!fs.existsSync(skills.skillPath(name))) return void res.status(404).json({ error: "No such skill." });
+    const text = str(req.body.text, 60_000);
+    if (!/^---\n[\s\S]*?\n---/.test(text)) return void res.status(400).json({ error: "Keep the --- header with the name and description at the top." });
+    skills.writeSkill(name, skills.cleanSkill(text, name).text.replace(/^name: .*$/m, `name: ${name}`));
+    res.json({ ok: true });
+  }));
+  api.post("/skills/:name/restore", guard((req, res) => {
+    skills.restoreSkillVersion(String(req.params.name), str(req.body.version, 80));
+    res.json({ ok: true });
+  }));
+
+  // ---- teach by demo: record the screen while the user does a task, then the bot writes the skill
+  api.post("/teach/start", async (req, res) => {
+    try {
+      const b = getBot(str(req.body.botId)) ?? activeBot();
+      res.json(await startTeaching(b.id, str(req.body.title, 80).trim()));
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  });
+  api.post("/teach/stop", async (req, res) => {
+    try {
+      res.json(await stopTeaching(str(req.body?.note, 2000)));
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  });
   api.post("/skills/:name/run", (req, res) => {
     handleUserMessage(`Use the "${String(req.params.name)}" skill now. Ask me for anything it needs that you don't know.`, { botId: str(req.body.botId) || undefined, source: "app" });
     res.json({ ok: true });
@@ -408,9 +512,10 @@ export function startWeb() {
     res.json({ ok: true });
   });
   api.patch("/settings", (req, res) => {
-    for (const key of ["autoReview", "proactive", "voiceReplies", "fullAccess"] as const) {
+    for (const key of ["autoReview", "proactive", "voiceReplies", "fullAccess", "verify"] as const) {
       if (req.body[key] !== undefined) state.settings[key] = !!req.body[key];
     }
+    if (["morning", "thrice"].includes(req.body.proactiveMode)) state.settings.proactiveMode = req.body.proactiveMode;
     save();
     stateChanged();
     res.json(state.settings);

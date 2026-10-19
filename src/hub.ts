@@ -20,6 +20,8 @@ export type RunView = {
   costUsd?: number;
   stalled?: boolean;
   model?: string; // which model handled it (Auto picks per task)
+  live?: string; // the reply as it's being written (never saved to disk)
+  replay?: string; // a clip of what the bot did in the browser (path in the workspace)
 };
 
 export type CardButton = { label: string; value: string; style?: "primary" | "danger" | "default" };
@@ -101,7 +103,7 @@ function flush() {
       threads.set(botId, t);
       // Write a temporary file and swap it in, so a crash or power cut mid-write never corrupts the history.
       const file = threadFile(botId);
-      fs.writeFileSync(`${file}.tmp`, JSON.stringify(t), { mode: 0o600 });
+      fs.writeFileSync(`${file}.tmp`, JSON.stringify(t, (key, value) => (key === "live" ? undefined : value)), { mode: 0o600 });
       fs.renameSync(`${file}.tmp`, file);
     } catch (error) {
       console.error(`Couldn't save chat history for ${botId}:`, (error as Error).message);

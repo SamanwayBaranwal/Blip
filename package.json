@@ -2,13 +2,15 @@
   "name": "blip",
   "version": "1.0.0",
   "private": true,
-  "description": "Blip — your own always-on AI agents (Grok Bot / Dots style) running on your Mac, controlled from your phone.",
+  "description": "Blip \u2014 your own always-on AI agents (Grok Bot / Dots style) running on your Mac, controlled from your phone.",
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
     "build": "tsc",
     "start": "node dist/main.js",
-    "dev": "tsc && node dist/main.js"
+    "dev": "tsc && node dist/main.js",
+    "test": "tsc && node --test --test-force-exit --test-timeout=60000 --test-concurrency=4 \"test/unit/*.test.mjs\"",
+    "test:golden": "tsc && node test/golden/run.mjs"
   },
   "engines": {
     "node": ">=22"

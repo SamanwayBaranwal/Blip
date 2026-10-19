@@ -18,12 +18,13 @@ const READ_ONLY_SAFE = new Set([
   "mcp__browser__browser_take_screenshot", "mcp__browser__browser_tabs", "mcp__browser__browser_wait_for",
   "mcp__browser__browser_console_messages", "mcp__browser__browser_resize", "mcp__browser__browser_hover",
   "mcp__browser__browser_find", "mcp__browser__browser_close",
-  "mcp__blip__mac_screenshot", "mcp__blip__mac_scroll", "mcp__blip__list_routines", "mcp__blip__suggest",
+  "mcp__blip__mac_screenshot", "mcp__blip__mac_scroll", "mcp__blip__list_routines", "mcp__blip__suggest", "mcp__blip__search_memory",
+  "mcp__blip__calendar_events", "mcp__blip__reminders_list", "mcp__blip__contacts_find", "mcp__blip__mail_inbox", "mcp__blip__find_files",
 ]);
 // Also safe outside read-only runs: delegating to teammates and the bot's own bookkeeping tools.
 const SAFE = new Set([
   ...READ_ONLY_SAFE, "Task", "Agent", "mcp__browser__browser_install",
-  "mcp__blip__send_to_phone", "mcp__blip__add_routine", "mcp__blip__remove_routine", "mcp__blip__save_skill",
+  "mcp__blip__send_to_phone", "mcp__blip__add_routine", "mcp__blip__add_event_routine", "mcp__blip__remove_routine", "mcp__blip__save_skill",
 ]);
 // Tools that act on screens and pages as the user. These never get a permanent "Always allow": what they do
 // depends on *what* is clicked or typed, not the tool (Muse users had standing approvals share a home address).
@@ -41,8 +42,14 @@ const PAYMENT_WORDS = /\b(pay|payment|purchase|buy|order|checkout|check out|plac
 const READ_TOOLS = new Set(["Read", "Glob", "Grep", "LS"]);
 const WRITE_TOOLS = new Set(["Write", "Edit", "MultiEdit", "NotebookEdit"]);
 // Whole words only: "checkout_cart" or "get_or_create_order" are not reads.
-const READ_VERB = /^(get|list|search|read|fetch|find|query|describe|view|show|lookup|retrieve|count)([_\-.]|[A-Z]|$)/;
-const WRITE_VERB = /(create|update|delete|remove|send|post|write|set|add|cancel|pay|order|checkout|book|submit|move|archive|modify|edit|insert|upsert)/i;
+const READ_VERBS = new Set(["get", "list", "search", "read", "fetch", "find", "query", "describe", "view", "show", "lookup", "retrieve", "count"]);
+const WRITE_VERBS = new Set(["create", "update", "delete", "remove", "send", "post", "write", "set", "add", "cancel", "pay", "order", "checkout", "book", "submit", "move", "archive", "modify", "edit", "insert", "upsert", "reply", "forward", "share", "invite", "publish", "transfer"]);
+/** A connector tool only counts as reading when its name starts with a read verb and has no write verb in it
+ *  (whole words: "get_orders" reads, "get_or_create_order" and "checkout_cart" don't). */
+function isReadTool(name: string) {
+  const words = name.replace(/([a-z])([A-Z])/g, "$1_$2").toLowerCase().split(/[_\-.\s]+/).filter(Boolean);
+  return READ_VERBS.has(words[0] ?? "") && !words.some((w) => WRITE_VERBS.has(w));
+}
 const APPROVAL_TIMEOUT_MS = 3 * 60 * 60_000;
 const REMINDERS_MS = [10 * 60_000, 60 * 60_000];
 
@@ -61,8 +68,9 @@ export type RunContext = {
 };
 
 /** Tools that drive the shared browser or the Mac's screen, so only one task at a time may use them. */
-const usesComputer = (toolName: string) =>
-  (toolName.startsWith("mcp__browser__") || toolName.startsWith("mcp__blip__mac_") || toolName === "mcp__blip__request_takeover") &&
+/** A bot with its own browser only takes turns for the real screen and mouse, never for browsing. */
+const usesComputer = (toolName: string, bot?: BotProfile) =>
+  ((toolName.startsWith("mcp__browser__") && !bot?.ownBrowser) || toolName.startsWith("mcp__blip__mac_") || toolName === "mcp__blip__request_takeover") &&
   toolName !== "mcp__blip__mac_screenshot";
 
 function resolvePath(p: unknown): string | undefined {
@@ -78,16 +86,20 @@ export function inside(child: string, parent: string) {
 
 /** Real, lower-cased path: macOS disks ignore case (~/.SSH is ~/.ssh) and symlinks can point anywhere. */
 function canonical(p: string) {
-  let real = p;
-  try {
-    real = fs.realpathSync.native(p);
-  } catch {
-    // doesn't exist yet: resolve the folder it would be created in
+  // A file that doesn't exist yet (maybe in folders that don't either): resolve the nearest folder that does,
+  // so symlinks (including macOS's own /var → /private/var) can't hide where it really lands.
+  let dir = path.resolve(p);
+  const rest: string[] = [];
+  for (;;) {
     try {
-      real = path.join(fs.realpathSync.native(path.dirname(p)), path.basename(p));
-    } catch {}
+      return path.join(fs.realpathSync.native(dir), ...rest).toLowerCase();
+    } catch {
+      const parent = path.dirname(dir);
+      if (parent === dir) return path.resolve(p).toLowerCase();
+      rest.unshift(path.basename(dir));
+      dir = parent;
+    }
   }
-  return real.toLowerCase();
 }
 // Secrets live outside the workspace; searching a folder that contains one (like ~) counts as touching it.
 const SECRET_PATHS = SENSITIVE_PATHS.filter((s) => !inside(s, config.workspace));
@@ -319,7 +331,7 @@ async function withSecrets(
 /** Take turns on the browser and screen with other bots working in parallel. Only once the action is
  *  allowed: a bot waiting hours on an approval card mustn't hold the computer meanwhile. */
 async function takeComputer(ctx: RunContext, toolName: string, decision: PermissionResult, signal: AbortSignal): Promise<PermissionResult> {
-  if (decision.behavior !== "allow" || !usesComputer(toolName)) return decision;
+  if (decision.behavior !== "allow" || !usesComputer(toolName, ctx.bot)) return decision;
   let waited = false;
   try {
     await acquireComputer({ runId: ctx.runId, botId: ctx.bot.id, botName: ctx.bot.name }, signal, (who) => {
@@ -380,7 +392,7 @@ function decider(ctx: RunContext): Decide {
     const [prefix, server, ...rest] = toolName.split("__");
     const connectorName = prefix === "mcp" && server && !["blip", "browser"].includes(server) ? server : undefined;
     const connectorTool = rest.join("__");
-    const connectorReadOnly = connectorName ? READ_VERB.test(connectorTool) && !WRITE_VERB.test(connectorTool) : false;
+    const connectorReadOnly = connectorName ? isReadTool(connectorTool) : false;
 
     // 1. Read-only runs (proactive check-ins) can look but never touch.
     if (ctx.readOnly) {

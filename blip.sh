@@ -9,6 +9,8 @@
 #   ./blip.sh link       show the app link + QR code to open on your phone
 #   ./blip.sh remote     make the app reachable from anywhere over Tailscale (private HTTPS)
 #   ./blip.sh app        build the Blip Mac app and put it in Applications
+#   ./blip.sh backups    list the nightly backups
+#   ./blip.sh restore F  put a backup back (the current data is kept aside first)
 set -e
 cd "${0:A:h}"
 DIR="$PWD"
@@ -151,6 +153,22 @@ case "$1" in
   logs)
     tail -n 50 -f logs/blip.log
     ;;
+  backups)
+    ls -lh "${BACKUP_DIR:-$HOME/Blip-backups}" 2>/dev/null || echo "No backups yet. They're made every night at 03:30, or from Settings → This Mac → Back up now."
+    ;;
+  restore)
+    # Puts a nightly backup back. The current data is kept aside first, so a restore can be undone.
+    FILE="$2"
+    [[ -f "$FILE" ]] || { echo "Usage: ./blip.sh restore ~/Blip-backups/blip-YYYY-MM-DD-HH-MM.tgz   (list them: ./blip.sh backups)"; exit 1; }
+    STAMP="$(date +%Y%m%d-%H%M%S)"
+    launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+    mkdir -p "restore-safety-$STAMP"
+    [[ -d data ]] && mv data "restore-safety-$STAMP/"
+    [[ -d workspace ]] && mv workspace "restore-safety-$STAMP/"
+    tar -xzf "$FILE" -C "$DIR"
+    echo "✅ Restored $FILE. Your previous data is in $DIR/restore-safety-$STAMP (delete it once you're happy)."
+    if [[ -f "$PLIST" ]]; then load_service; echo "🔄 Blip is starting again."; else echo "Start it with ./blip.sh install"; fi
+    ;;
   status)
     launchctl print "$DOMAIN/$LABEL" 2>/dev/null | grep -E "state =|pid =|last exit" || echo "Not installed."
     ;;
@@ -188,6 +206,6 @@ case "$1" in
     show_link
     ;;
   *)
-    echo "Usage: ./blip.sh setup | install | restart | stop | logs | status | link | remote | app"
+    echo "Usage: ./blip.sh setup | install | restart | stop | logs | status | link | remote | app | backups | restore <file>"
     ;;
 esac

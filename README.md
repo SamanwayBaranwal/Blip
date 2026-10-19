@@ -6,6 +6,18 @@ Meet **Blip**: a mouse pointer that came alive and does things on your computer 
 
 Every bot has the Mac as its computer: a terminal, files, a real Chrome browser, and control of Mac apps. You talk to your bots in the Blip app (installed on your phone's Home Screen) or, optionally, Telegram. Risky actions come to you as approval cards first.
 
+## Quick start
+
+On the Mac that will run Blip (it should stay on and logged in):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/SamanwayBaranwal/blip/main/install.sh | zsh
+```
+
+It installs Blip in `~/Blip`, starts it, and prints a link for your phone. Then sign in to Claude Code once on that Mac. In the app, open **Settings → This Mac → Check Mac access** to allow Calendar, Reminders, Contacts and Mail. Running the same line again updates Blip.
+
+Want to add a skill, a tool or a connector? See [CONTRIBUTING.md](CONTRIBUTING.md).
+
 ## What it does
 
 - **Several bots** with their own name, job, personality, model, memory and conversation. A primary bot runs proactive check-ins, and bots can hand work to each other.
@@ -21,6 +33,19 @@ Every bot has the Mac as its computer: a terminal, files, a real Chrome browser,
 - **A secrets vault**: a bot asks for a password or API key on a masked card, and it's saved in the Mac's Keychain. Bots only ever see a placeholder like `{{secret:github-token}}`. Blip fills in the real value when an action runs, after you approve it, and scrubs it from anything a tool sends back. Manage your secrets in **Settings → Secrets**.
 - **Files panel**, **editable memory**, 👍/👎 feedback, **voice in and out**, **push notifications**, activity history and an action log.
 - **Runs on your Claude plan** with no API key, or on an Anthropic API key with a daily spending limit.
+- **Replies stream in** word by word, in Blip's own voice: sharp and direct, never corporate. Each bot has a personality setting: Professional, Blip or Spicy.
+- **Searchable memory**: bots search everything they've been told, including every past chat, even after New chat.
+- **Your Mac's own apps**: bots read your Calendar, Reminders, Contacts and Mail inbox and find files with Spotlight, directly and without clicking around. They add events and reminders with your approval.
+- **Event triggers**: a routine can start from a private link (iPhone Shortcuts, scripts), a new file in a folder, or an email from a given sender, not only on a schedule.
+- **Teach by showing**: record yourself doing a task once (up to 10 minutes), and the bot writes it up as a skill you can read and edit.
+- **Own browser per bot** (optional): a bot can browse at the same time as the others instead of taking turns.
+- **Talk mode**: a hands-free conversation (it listens, answers out loud and listens again), or hold the mic to send a voice message. Speech is turned into text on the Mac itself.
+- **Double-checks its work**: after a task that changes files, your calendar, reminders, routines or skills, an independent checker confirms it really happened.
+- **Skills you can share**: export or import any skill as one `.md` file, every edit keeps the old version, and a library of examples comes with Blip. When you ask for the same thing three times, Blip offers to save it as a skill.
+- **Looks after itself**:
+  - a nightly backup and a nightly self-test that reports in one quiet line
+  - Recover and Reset buttons
+  - an "offline since" screen when the Mac can't be reached
 
 ## Requirements
 
@@ -105,6 +130,10 @@ For the Computer panel (watching and controlling the screen) and for bots that u
 
 Then run `./blip.sh restart`.
 
+The first time a bot reads your Calendar, Reminders, Contacts or Mail, macOS asks for permission on the Blip Mac; click Allow. Mail must be open there for bots to read it.
+
+Calendar, Reminders and Contacts access and the fastest remote control use two small helpers that Blip builds itself. They need Apple's command line tools, installed once with `xcode-select --install`.
+
 ### Voice messages don't work
 
 Voice needs Homebrew's `whisper.cpp`. Homebrew renamed it from `whisper-cpp`, so older setups may have missed it. On the Mac running Blip, run:
@@ -138,6 +167,14 @@ Keep the lid open: a MacBook sleeps when the lid is closed.
 | `./blip.sh link` | Show the app link and QR code again |
 | `./blip.sh remote` | Turn on the private Tailscale HTTPS link |
 | `./blip.sh app` | Build the Mac app and install it in Applications |
+| `./blip.sh backups` | List the nightly backups |
+| `./blip.sh restore <file>` | Put a backup back. The current data is moved aside first, so you can undo it. |
+| `npm test` | Unit tests, under a second, nothing touched |
+| `npm run test:golden` | End-to-end tests: a throwaway Blip on Haiku runs about 14 real tasks (about 3 minutes, a few cents) |
+
+**If something gets stuck:** open **Settings → This Mac**.
+- **Recover** stops tasks and restarts the engines and the browser; nothing is lost.
+- **Reset** does the same and also starts a fresh chat for every bot. Memory, routines and secrets are kept.
 
 ## Configuration (`.env`)
 

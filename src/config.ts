@@ -4,7 +4,10 @@ import path from "node:path";
 import type { EffortLevel } from "@anthropic-ai/claude-agent-sdk";
 
 export const ROOT = path.resolve(import.meta.dirname, "..");
-const ENV_FILE = path.join(ROOT, ".env");
+// Settings, data, the workspace and logs live here. Normally the install folder; tests point it at a
+// temporary folder (BLIP_DATA_ROOT) so they never touch real chats, memory or the browser profile.
+export const DATA_ROOT = process.env.BLIP_DATA_ROOT ? path.resolve(process.env.BLIP_DATA_ROOT) : ROOT;
+const ENV_FILE = path.join(DATA_ROOT, ".env");
 
 if (!fs.existsSync(ENV_FILE)) {
   throw new Error(`Missing ${ENV_FILE}. Copy .env.example to .env and fill it in.`);
@@ -21,7 +24,7 @@ export function setAnthropicKey(key: string) {
   process.env.ANTHROPIC_API_KEY = key;
 }
 
-const workspace = path.join(ROOT, "workspace");
+const workspace = path.join(DATA_ROOT, "workspace");
 
 function optional(name: string): string | undefined {
   const value = process.env[name]?.trim();
@@ -48,8 +51,10 @@ export const config = {
   inbox: path.join(workspace, "inbox"),
   memoryDir: path.join(workspace, "memory"),
   skillsDir: path.join(workspace, ".claude", "skills"),
-  dataDir: path.join(ROOT, "data"),
-  browserProfile: path.join(ROOT, "data", "browser-profile"),
+  dataDir: path.join(DATA_ROOT, "data"),
+  logsDir: path.join(DATA_ROOT, "logs"),
+  browserProfile: path.join(DATA_ROOT, "data", "browser-profile"),
+  botBrowsersDir: path.join(DATA_ROOT, "data", "browser-profiles"),
   playwrightCli: path.join(ROOT, "node_modules", "@playwright", "mcp", "cli.js"),
   whisperModel: path.join(ROOT, "models", "ggml-small.bin"),
 };
@@ -73,7 +78,7 @@ export const WRITE_PROTECTED_PATHS = [
 export const SENSITIVE_PATHS = [
   ENV_FILE,
   config.dataDir,
-  path.join(ROOT, "logs"), // the log can hold the app link
+  path.join(DATA_ROOT, "logs"), // the log can hold the app link
   path.join(workspace, ".claude", "settings.json"),
   path.join(workspace, ".claude", "settings.local.json"),
   path.join(workspace, ".mcp.json"),

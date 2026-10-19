@@ -7,13 +7,29 @@ const html = htm.bind(h);
 // ============================================================ api
 class AuthError extends Error {}
 
+// When the Mac can't be reached (it's off, asleep, or restarting), the app says so and since when.
+let offlineSince = null;
+function reachable(ok) {
+  const next = ok ? null : offlineSince ?? Date.now();
+  if (next === offlineSince) return;
+  offlineSince = next;
+  emit();
+}
 async function api(path, { method = "GET", body } = {}) {
-  const res = await fetch(`/api${path}`, {
-    method,
-    headers: body !== undefined ? { "Content-Type": "application/json" } : {},
-    body: body !== undefined ? JSON.stringify(body) : undefined,
-    credentials: "same-origin",
-  });
+  let res;
+  try {
+    res = await fetch(`/api${path}`, {
+      method,
+      headers: body !== undefined ? { "Content-Type": "application/json" } : {},
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      credentials: "same-origin",
+    });
+  } catch (error) {
+    reachable(false);
+    throw new Error("Can't reach your Mac right now.");
+  }
+  // A proxy in front (Tailscale) answers 502/503/504 while Blip itself is down.
+  reachable(![502, 503, 504].includes(res.status));
   if (res.status === 401) throw new AuthError("login required");
   const data = res.headers.get("content-type")?.includes("json") ? await res.json() : null;
   if (!res.ok) throw new Error(data?.error || `Request failed (${res.status})`);
@@ -125,13 +141,83 @@ function upsert(m, live) {
     if (m.kind === "card") nativeNotify(m.card.type === "suggestion" ? `${name} has a suggestion` : `${name} needs you`, m.card.title);
     else if (m.role === "bot" && m.text) nativeNotify(name, m.text, !!bot?.quiet);
   }
-  if (live && isNew && m.role === "bot" && m.kind === "text" && m.meta?.voice && m.text && "speechSynthesis" in window) {
-    speechSynthesis.speak(new SpeechSynthesisUtterance(m.text.replace(/[•*_#`]/g, "").slice(0, 1500)));
-  }
+  if (live && isNew && m.role === "bot" && m.kind === "text" && m.meta?.voice && m.text) speakText(m.text);
   emit();
 }
 let selected = null;
 const selectedBot = () => selected;
+
+// ============================================================ voice out
+// The most natural voice on this device (Premium/Enhanced/Siri voices sound far less robotic), spoken one
+// sentence at a time (iPhone cuts long utterances off). `speechDone` lets talk mode wait until it's finished.
+let speechDone = Promise.resolve();
+function bestVoice() {
+  if (!("speechSynthesis" in window)) return null;
+  const all = speechSynthesis.getVoices();
+  const lang = (navigator.language || "en-US").slice(0, 2);
+  const pool = all.filter((v) => v.lang?.toLowerCase().startsWith(lang));
+  const list = pool.length ? pool : all;
+  return list.find((v) => /premium|neural|natural/i.test(v.name)) || list.find((v) => /enhanced|siri/i.test(v.name)) || list.find((v) => v.default) || list[0] || null;
+}
+if ("speechSynthesis" in window) speechSynthesis.getVoices(); // voices load in the background on some browsers
+function speakText(text) {
+  if (!("speechSynthesis" in window)) return Promise.resolve();
+  const clean = text.replace(/```[\s\S]*?```/g, " ").replace(/[•*_#`>]/g, "").replace(/https?:\/\/\S+/g, "link").slice(0, 2500);
+  const parts = clean.match(/[^.!?\n]+[.!?]*\s*/g)?.map((p) => p.trim()).filter(Boolean) ?? [];
+  speechDone = new Promise((resolve) => {
+    if (!parts.length) return resolve();
+    const voice = bestVoice();
+    parts.forEach((p, i) => {
+      const u = new SpeechSynthesisUtterance(p);
+      if (voice) u.voice = voice;
+      u.rate = 1.05;
+      if (i === parts.length - 1) u.onend = u.onerror = () => resolve();
+      speechSynthesis.speak(u);
+    });
+    setTimeout(resolve, 3 * 60_000); // never wait forever
+  });
+  return speechDone;
+}
+
+// ============================================================ voice in: talk mode
+/** Records one spoken message: starts when you speak, ends after a short silence. Null if nobody spoke. */
+function recordUtterance(stream, stillOn) {
+  return new Promise((resolve) => {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ctx = new AC();
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    ctx.createMediaStreamSource(stream).connect(analyser);
+    const buf = new Float32Array(analyser.fftSize);
+    const mr = new MediaRecorder(stream);
+    const chunks = [];
+    mr.ondataavailable = (e) => chunks.push(e.data);
+    let floor = 0.01, samples = 0, spoke = false, lastVoice = Date.now();
+    const started = Date.now();
+    const finish = (keep) => {
+      clearInterval(tick);
+      mr.onstop = () => {
+        ctx.close().catch(() => {});
+        resolve(keep && chunks.length ? new Blob(chunks, { type: mr.mimeType }) : null);
+      };
+      if (mr.state !== "inactive") mr.stop();
+      else mr.onstop();
+    };
+    const tick = setInterval(() => {
+      if (!stillOn()) return finish(false);
+      analyser.getFloatTimeDomainData(buf);
+      const rms = Math.sqrt(buf.reduce((s, v) => s + v * v, 0) / buf.length);
+      if (samples < 4) { floor = Math.max(floor, rms); samples++; return; } // the room's own noise first
+      const loud = rms > Math.max(0.02, floor * 2.5);
+      if (loud) { spoke = true; lastVoice = Date.now(); }
+      const now = Date.now();
+      if (spoke && now - lastVoice > 1200) finish(true); // you paused: that's the message
+      else if (!spoke && now - started > 20_000) finish(false); // nobody spoke: listen again
+      else if (now - started > 60_000) finish(spoke);
+    }, 100);
+    mr.start();
+  });
+}
 
 // ============================================================ helpers
 const fmtTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -205,6 +291,7 @@ const I = {
   book: () => svg(html`<path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z" /><path d="M4 19V5" />`),
   pulse: () => svg(html`<path d="M3 12h4l3-8 4 16 3-8h4" />`),
   gear: () => svg(html`<circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 0 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 0 1 0-4h.1A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 0 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 0 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z" />`),
+  wave: () => svg(html`<path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4" />`),
   download: () => svg(html`<path d="M12 4v11M7 10l5 5 5-5M5 20h14" />`),
   trash: () => svg(html`<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3" />`),
   play: () => svg(html`<path d="M7 5v14l11-7z" fill="currentColor" />`),
@@ -506,6 +593,13 @@ function RunBlock({ m, bot }) {
   const title = r.status === "waiting" ? "Waiting for you" : live ? (r.stalled ? "Still working" : "Working") : r.status === "failed" ? "Failed" : r.status === "stopped" ? "Stopped" : r.status === "nothing new" ? "Nothing new" : `Worked for ${dur(elapsed)}`;
   const sub = live ? (r.status === "waiting" ? "answer below" : last || "Starting") : `${r.model ? `${r.model} · ` : ""}${r.steps.length} step${r.steps.length === 1 ? "" : "s"}${r.costUsd && store.state?.authMode !== "plan" ? ` · ${money(r.costUsd)}` : ""}`;
   const shown = live ? r.steps.slice(-8) : r.steps;
+  // The reply streams in under the timeline while it's being written; the saved reply replaces it.
+  const streaming = live && r.live
+    ? html`<div class="msg bot streaming">
+        <${Avatar} bot=${bot} size=${28} still />
+        <div class="body"><div class="text" dangerouslySetInnerHTML=${{ __html: md(r.live) }} /></div>
+      </div>`
+    : null;
   return html`<div class=${`run ${live ? "live" : ""} ${r.status === "waiting" ? "waiting" : ""}`}>
     <button class="run-head" onClick=${() => setOpen(!isOpen)}>
       ${live ? html`<${Blip} size=${32} look=${bot?.look} state=${r.status === "waiting" ? "needs" : "working"} />` : html`<span class="state-dot" style=${r.status === "failed" ? "color:var(--danger)" : ""}><${stateIcon || I.okCircle} /></span>`}
@@ -513,8 +607,12 @@ function RunBlock({ m, bot }) {
       ${live ? html`<span class="time">${r.model ? `${r.model} · ` : ""}${dur(elapsed)}</span>` : null}
       <span class=${`chev ${isOpen ? "open" : ""}`}><${I.chevron} /></span>
     </button>
-    ${isOpen && (r.plan.length || r.steps.length)
+    ${r.replay && !live
+      ? html`<button class="replay-link" onClick=${() => setOpen(true)}><${I.play} /> Watch replay${isOpen ? "" : " · what it did in the browser"}</button>`
+      : null}
+    ${isOpen && (r.plan.length || r.steps.length || r.replay)
       ? html`<div class="run-body">
+          ${r.replay && !live ? html`<video class="replay" controls playsinline preload="metadata" src=${`/api/file?path=${encodeURIComponent(r.replay)}`} />` : null}
           ${r.plan.length
             ? html`<div class="plan">${r.plan.map((t) => html`<div class=${t.status === "completed" ? "done" : t.status === "in_progress" ? "now" : ""}>
                 <span class=${`tick ${t.status === "completed" ? "done" : t.status === "in_progress" ? "now" : ""}`}>${t.status === "completed" ? html`<${I.check} />` : null}</span>
@@ -524,7 +622,7 @@ function RunBlock({ m, bot }) {
           ${shown.length ? html`<div class="steps">${shown.map((s) => html`<div><time>${fmtTime(s.at)}</time><span>${s.text}</span></div>`)}</div>` : null}
         </div>`
       : null}
-  </div>`;
+  </div>${streaming}`;
 }
 
 const KICKER = { approval: "Needs your approval", draft: "Draft · review before it's sent", takeover: "Your turn", suggestion: "Suggestion", secret: "Secret · saved to the Keychain" };
@@ -569,7 +667,7 @@ function Card({ m, onTakeover }) {
           ${c.type === "takeover" ? html`<button class="btn" onClick=${onTakeover}><${I.computer} /> Open computer</button>` : null}
           ${c.buttons.map((b) => html`<button class=${`btn ${b.style || ""}`} disabled=${busy} onClick=${() => answer(b.value)}>${b.label}</button>`)}
         </div>`
-      : html`<div class="card-answer">${c.status === "expired" ? null : html`<span class="state-dot"><${I.okCircle} /></span>`} ${c.answer}</div>`}
+      : html`<div class="card-answer">${c.status === "expired" ? null : html`<span class="state-dot"><${I.okCircle} /></span>`} ${c.answer || (c.status === "expired" ? "Expired: Blip restarted before you answered" : "")}</div>`}
   </div>`;
 }
 
@@ -684,6 +782,80 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
       setFiles((prev) => [...prev, { name: f.name, type: f.type, data, preview: f.type.startsWith("image/") ? URL.createObjectURL(f) : null }]);
     }
   };
+  // Talk mode: a hands-free conversation. Listen → send → wait for the reply → hear it → listen again.
+  const [talk, setTalk] = useState(false);
+  const [talkState, setTalkState] = useState("");
+  useEffect(() => {
+    if (!talk) return;
+    let on = true, stream;
+    const stillOn = () => on;
+    (async () => {
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+      } catch {
+        toast("Talk mode needs the mic. On iPhone use the https:// Tailscale link and allow the microphone.");
+        return setTalk(false);
+      }
+      while (on) {
+        setTalkState("Listening…");
+        const blob = await recordUtterance(stream, stillOn);
+        if (!on) break;
+        if (!blob) continue;
+        setTalkState("Transcribing…");
+        let heard = "";
+        try {
+          const ext = blob.type.includes("mp4") ? "m4a" : "webm";
+          heard = (await api("/voice", { method: "POST", body: { name: `voice.${ext}`, data: await readAsBase64(blob) } })).text?.trim();
+        } catch (e) {
+          fail(e);
+        }
+        if (!heard || !on) continue;
+        if (/^(stop|exit|end) talk(ing)?( mode)?[.!]?$/i.test(heard)) break;
+        const sentAt = Date.now();
+        await api("/send", { method: "POST", body: { botId: bot.id, text: heard, voice: true } }).catch(fail);
+        setTalkState("Thinking…");
+        // Wait for this bot's reply (it's spoken automatically), then for the voice to finish. If it stops to
+        // ask for approval, say so once: approvals are only ever given by tapping, never by voice.
+        let toldAboutCard = false;
+        for (let i = 0; on && i < 1800; i++) {
+          const list = store.threads[bot.id] || [];
+          if (list.some((m) => m.role === "bot" && m.kind === "text" && m.at > sentAt)) break;
+          if (!toldAboutCard && list.some((m) => m.kind === "card" && m.card.status === "pending" && m.at > sentAt)) {
+            toldAboutCard = true;
+            setTalkState("Needs your OK in the chat…");
+            await speakText("I need your OK for that. Tap the card in the chat.");
+          }
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        setTalkState("Speaking…");
+        await new Promise((r) => setTimeout(r, 200));
+        await speechDone;
+      }
+      on = false;
+      setTalk(false);
+    })();
+    return () => {
+      on = false;
+      stream?.getTracks().forEach((t) => t.stop());
+      if ("speechSynthesis" in window) speechSynthesis.cancel();
+      setTalkState("");
+    };
+  }, [talk, bot.id]);
+
+  // The mic: tap to start and tap again to send, or hold it while you talk and let go to send.
+  const press = useRef({ at: 0, stopOnUp: false });
+  const micDown = (e) => {
+    if (e.button > 0) return;
+    press.current = { at: Date.now(), stopOnUp: !!recRef.current };
+    if (!recRef.current) toggleMic();
+  };
+  const micUp = () => {
+    const held = Date.now() - press.current.at > 450;
+    if (press.current.stopOnUp || held) {
+      if (recRef.current) recRef.current.stop();
+      else press.current.stopWhenReady = held; // released before the mic finished starting
+    }
+  };
   const toggleMic = async () => {
     if (rec) return rec.stop();
     let stream;
@@ -710,6 +882,10 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
       mr.start();
       recRef.current = mr;
       setRec(mr);
+      if (press.current.stopWhenReady) {
+        press.current.stopWhenReady = false;
+        setTimeout(() => mr.state !== "inactive" && mr.stop(), 300);
+      }
     } catch (err) {
       stream?.getTracks().forEach((t) => t.stop());
       const name = err?.name || "";
@@ -730,7 +906,7 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
   };
   const empty = !text.trim() && !files.length;
   const queued = st.runtime.queued.length;
-  const hint = rec ? "Listening — tap the mic again to send" : running ? "Messages you send now steer the task in progress." : queued ? `${queued} task${queued > 1 ? "s" : ""} queued` : "";
+  const hint = talk ? `Talk mode · ${talkState || "Starting…"} Say "stop talking" or tap the wave to end.` : rec ? "Listening. Tap the mic again (or let go) to send." : running ? "Messages you send now steer the task in progress." : queued ? `${queued} task${queued > 1 ? "s" : ""} queued` : "";
   return html`<div class="composer-wrap">
     <div class="composer">
       ${files.length
@@ -741,7 +917,8 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
       <div class="composer-row">
         <button class="icon-btn" onClick=${() => fileInput.current.click()} aria-label="Attach"><${I.clip} /></button>
         <input type="file" multiple hidden ref=${fileInput} onChange=${pick} />
-        <button class=${`icon-btn ${rec ? "rec" : ""}`} onClick=${toggleMic} aria-label="Voice"><${I.mic} /></button>
+        <button class=${`icon-btn ${rec ? "rec" : ""}`} onPointerDown=${micDown} onPointerUp=${micUp} onPointerCancel=${micUp} onKeyDown=${(e) => (e.key === "Enter" || e.key === " ") && (e.preventDefault(), toggleMic())} onContextMenu=${(e) => e.preventDefault()} aria-label="Voice message (tap, or hold and talk)"><${I.mic} /></button>
+        <button class=${`icon-btn ${talk ? "rec" : ""}`} onClick=${() => { if (!talk) speakText(""); setTalk(!talk); }} aria-label=${talk ? "End talk mode" : "Talk mode"} title="Talk mode: a hands-free conversation"><${I.wave} /></button>
         <button class="chip btn" onClick=${onModel}>${shortModel(bot.model)}</button>
         <span class="spacer" />
         ${running && empty
@@ -1446,6 +1623,9 @@ function Panel({ tab, setTab, bot, onClose, onImage, control, setControl }) {
 }
 
 // ============================================================ sheets
+const copyText = (t, done = "Copied") =>
+  navigator.clipboard ? navigator.clipboard.writeText(t).then(() => toast(done)).catch(() => toast(t)) : toast(t);
+
 function RoutinesSheet({ st, botId, onClose }) {
   const [routines, reload] = useLoad(() => api("/routines"), []);
   const [tpl] = useLoad(() => api("/templates"), []);
@@ -1455,7 +1635,8 @@ function RoutinesSheet({ st, botId, onClose }) {
   return html`<${Sheet} title="Routines" onClose=${onClose}>
     ${routines === null ? html`<div class="empty">Loading…</div>`
       : routines.length ? html`<div class="list">${routines.map((r) => html`<div class="row">
-          <div class="grow"><b>${r.name}</b><span>${r.bot} · ${r.schedule} · next ${r.next ? fmtDay(r.next) : "—"}</span></div>
+          <div class="grow"><b>${r.name}</b><span>${r.bot} · ${r.when ? r.when : `${r.schedule} · next ${r.next ? fmtDay(r.next) : "—"}`}</span></div>
+          ${r.hook ? html`<button class="btn small" onClick=${() => copyText(location.origin + r.hook, "Link copied. Treat it like a password.")}>Copy link</button>` : null}
           <button class="btn small" onClick=${() => run(r)}><${I.play} /> Test</button>
           <button class="icon-btn" onClick=${() => del(r)} aria-label="Delete"><${I.trash} /></button>
         </div>`)}</div>`
@@ -1465,24 +1646,98 @@ function RoutinesSheet({ st, botId, onClose }) {
   <//>`;
 }
 
-function SkillsSheet({ botId, onClose }) {
+function SkillsSheet({ botId, onClose, setControl }) {
   const [skills, reload] = useLoad(() => api("/skills"), []);
+  const [library, reloadLibrary] = useLoad(() => api("/skills/library"), []);
+  const [editing, setEditing] = useState(null); // { name, text, versions }
+  const importInput = useRef();
+  const importFile = async (e) => {
+    const file = e.target.files[0];
+    e.target.value = "";
+    if (!file) return;
+    api("/skills/import", { method: "POST", body: { fileName: file.name, data: await readAsBase64(file) } })
+      .then((r) => { toast(`Imported ${r.name}`); reload(); })
+      .catch(fail);
+  };
+  const addLibrary = (s) => api(`/skills/library/${s.name}`, { method: "POST" }).then(() => { toast(`Added ${s.name}`); reload(); reloadLibrary(); }).catch(fail);
+  const restore = (v) => api(`/skills/${editing.name}/restore`, { method: "POST", body: { version: v.id } }).then(() => api(`/skills/${editing.name}`)).then((s) => { setEditing(s); toast("Restored that version"); }).catch(fail);
+  const [title, setTitle] = useState("");
   const run = (s) => api(`/skills/${s.name}/run`, { method: "POST", body: { botId } }).then(() => { toast(`Running ${s.name}`); onClose(); }).catch(fail);
   const del = (s) => confirm(`Delete skill "${s.name}"?`) && api(`/skills/${s.name}`, { method: "DELETE" }).then(reload).catch(fail);
-  const teach = () =>
+  const open = (s) => api(`/skills/${s.name}`).then(setEditing).catch(fail);
+  const saveEdit = () => api(`/skills/${editing.name}`, { method: "PUT", body: { text: editing.text } }).then(() => { toast("Skill saved"); setEditing(null); reload(); }).catch(fail);
+  const record = (e) => {
+    e.preventDefault();
+    api("/teach/start", { method: "POST", body: { botId, title } })
+      .then(() => { toast("Recording. Do the task on the Mac, then tap Stop."); onClose(); if (coarse) setControl?.(true); })
+      .catch(fail);
+  };
+  const walkthrough = () =>
     api("/send", { method: "POST", body: { botId, text: "I want to teach you a task so you can do it again later. Ask me what you need, then walk through it with me step by step (do the steps on this Mac as we go so we know they work). Note the criteria and edge cases I mention. When we're done, save it with save_skill and tell me how to run it." } })
       .then(onClose)
       .catch(fail);
-  return html`<${Sheet} title="Skills" onClose=${onClose} actions=${html`<button class="btn small primary" onClick=${teach}>Teach a task</button>`}>
-    <p class="hint" style="margin-top:0">Skills are how-tos your bots saved after you showed them a task once. Every bot can use them.</p>
+  if (editing) {
+    return html`<${Sheet} title=${editing.name} onClose=${() => setEditing(null)} actions=${html`<button class="btn small primary" onClick=${saveEdit}>Save</button>`}>
+      <p class="hint" style="margin-top:0">Every bot follows these steps when it uses this skill. Keep the --- header at the top.</p>
+      <textarea id="skill-text" class="input skill-editor" value=${editing.text} onInput=${(e) => setEditing({ ...editing, text: e.target.value })} spellcheck="false" />
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <a class="btn small" href=${`/api/skills/${editing.name}/export`} download=${`${editing.name}.skill.md`}><${I.download} /> Export</a>
+      </div>
+      ${editing.versions?.length
+        ? html`<div class="section-title">Earlier versions</div>
+          <div class="list">${editing.versions.slice(0, 8).map((v) => html`<div class="row"><div class="grow"><b>${fmtDay(Date.parse(v.at))}</b><span>${Math.max(1, Math.round(v.bytes / 1000))} KB</span></div>
+            <button class="btn small" onClick=${() => restore(v)}>Restore</button></div>`)}</div>`
+        : null}
+    <//>`;
+  }
+  return html`<${Sheet} title="Skills" onClose=${onClose}>
+    <p class="hint" style="margin-top:0">Skills are how-tos your bots learned from you. Every bot can use them. Tap one to read or edit it.</p>
+    <div class="section-title" style="margin-top:4px">Teach by showing</div>
+    <form class="type-row" onSubmit=${record}>
+      <input id="teach-title" class="input" placeholder="What's the task? e.g. Download my bank statement" value=${title} onInput=${(e) => setTitle(e.target.value)} />
+      <button class="btn small primary" disabled=${!title.trim()}><span class="rec-dot" /> Record</button>
+    </form>
+    <p class="hint">Do it once on the Mac (up to 10 minutes), at the Mac or with remote control. Blip watches, then writes the steps and asks about anything unclear. Passwords you type are never shown to it.</p>
+    <button class="btn small" style="margin-bottom:6px" onClick=${walkthrough}>Or explain it in the chat instead</button>
+    <div style="display:flex;justify-content:space-between;align-items:center"><div class="section-title">Saved skills</div>
+      <button class="btn small" onClick=${() => importInput.current.click()}>Import</button>
+      <input type="file" accept=".md,text/markdown,text/plain" hidden ref=${importInput} onChange=${importFile} /></div>
     ${skills === null ? html`<div class="empty">Loading…</div>`
       : skills.length ? html`<div class="list">${skills.map((s) => html`<div class="row">
-          <div class="grow"><b>${s.name}</b><span>${s.description}</span></div>
+          <button class="grow skill-open" onClick=${() => open(s)}><b>${s.name}</b><span>${s.description}</span></button>
           <button class="btn small" onClick=${() => run(s)}><${I.play} /> Run</button>
           <button class="icon-btn" onClick=${() => del(s)} aria-label="Delete"><${I.trash} /></button>
         </div>`)}</div>`
-      : html`<div class="empty">No skills yet. Tap “Teach a task”, or after a job say “save this as a skill”.</div>`}
+      : html`<div class="empty">No skills yet. Record one above, add one from the library, or after a job say “save this as a skill”.</div>`}
+    ${library?.some((s) => !s.installed)
+      ? html`<div class="section-title">Library</div>
+        <div class="list">${library.filter((s) => !s.installed).map((s) => html`<div class="row">
+          <div class="grow"><b>${s.name}</b><span>${s.description}</span></div>
+          <button class="btn small" onClick=${() => addLibrary(s)}>Add</button></div>`)}</div>`
+      : null}
   <//>`;
+}
+
+/** Shown while a demo is being recorded: how long so far, and Stop (also over the remote screen). */
+function TeachBanner({ st, setControl }) {
+  const t = st.teach;
+  const now = useNow(!!t?.recording, 1000);
+  const [stopping, setStopping] = useState(false);
+  if (!t?.recording) return null;
+  const secs = Math.max(0, Math.round((now - t.startedAt) / 1000));
+  const clock = (n) => `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`;
+  const stop = () => {
+    setStopping(true);
+    api("/teach/stop", { method: "POST", body: {} })
+      .then((r) => { toast(`Sent ${r.moments} key moments. Your bot is writing the skill.`); setControl?.(false); })
+      .catch(fail)
+      .finally(() => setStopping(false));
+  };
+  return html`<div class="teach-banner" role="status">
+    <span class="rec-dot" /><span class="teach-clock">${clock(secs)} / ${clock(t.maxSeconds)}</span><span class="grow">Recording “${t.title || "demo"}”</span>
+    ${coarse ? html`<button class="btn small" onClick=${() => setControl?.(true)}>Screen</button>` : null}
+    <button class="btn small primary" disabled=${stopping} onClick=${stop}>${stopping ? "Saving…" : "Stop"}</button>
+  </div>`;
 }
 
 function ActivitySheet({ onClose }) {
@@ -1539,6 +1794,77 @@ function PairPhone() {
         </div>`}`;
 }
 
+/** Outage alerts: a ping link from a free uptime monitor, which alerts you when the Mac goes quiet. */
+function HeartbeatRow({ h, reload }) {
+  const [url, setUrl] = useState("");
+  const [editing, setEditing] = useState(false);
+  const save = (e) => {
+    e.preventDefault();
+    api("/heartbeat", { method: "POST", body: { url } })
+      .then((r) => { toast(r.cleared ? "Outage alerts off" : r.ok ? "Ping sent. Your monitor should show it now." : `The monitor didn't answer (${r.status || r.error})`); setEditing(false); reload(); })
+      .catch(fail);
+  };
+  const hb = h?.heartbeat;
+  return html`<div class="section-title">Outage alerts</div>
+    ${hb?.set && !editing
+      ? html`<div class="row"><div class="grow"><b>On</b><span>${hb.last ? `Last ping ${fmtDay(Date.parse(hb.last.at))} · ${hb.last.ok ? "received" : "failed"}` : "Pinging every 5 minutes"}</span></div>
+          <button class="btn small" onClick=${() => setEditing(true)}>Change</button></div>`
+      : html`<p class="hint" style="margin-top:0">A Mac that's off can't warn you. Make a free check at healthchecks.io (period 5 minutes, grace 10), paste its ping link here, and it emails or texts you when Blip goes quiet.</p>
+        <form class="type-row" onSubmit=${save}>
+          <input id="heartbeat-url" class="input" placeholder="https://hc-ping.com/…" value=${url} onInput=${(e) => setUrl(e.target.value)} autocapitalize="off" />
+          ${hb?.set
+            ? html`<button class="btn small primary">${url ? "Save & test" : "Turn off"}</button>`
+            : html`<button class="btn small primary" disabled=${!url.trim()}>Save & test</button>`}
+        </form>`}`;
+}
+
+/** The Mac's health: last backup and self-test, plus Recover and Reset for when something gets stuck. */
+function HealthSection() {
+  const [h, reload] = useLoad(() => api("/health"), []);
+  const [busy, setBusy] = useState(null);
+  const [armed, setArmed] = useState(false); // Reset needs a second tap
+  const [access, setAccess] = useState(null);
+  const checkAccess = () => {
+    setBusy("check");
+    api("/check-mac", { method: "POST" }).then(setAccess).catch(fail).finally(() => setBusy(null));
+  };
+  const act = (what, label, body = {}) => {
+    setBusy(what);
+    api(`/${what}`, { method: "POST", body })
+      .then((r) => { toast(r.steps ? r.steps.join(" · ") : label(r)); reload(); })
+      .catch(fail)
+      .finally(() => { setBusy(null); setArmed(false); });
+  };
+  const b = h?.lastBackup, t = h?.lastSelfTest;
+  return html`<div class="section-title">This Mac</div>
+    <div class="list">
+      <div class="row"><div class="grow"><b>Self-test</b><span>${t ? `${t.passed}/${t.total} passed · ${fmtDay(Date.parse(t.at))}${t.failures.length ? ` · ${t.failures.join("; ")}` : ""}` : "Runs every night at 03:40"}</span></div>
+        <button class="btn small" disabled=${!!busy} onClick=${() => act("selftest", (r) => `${r.passed}/${r.total} checks passed`)}>${busy === "selftest" ? "Testing…" : "Run now"}</button></div>
+      <div class="row"><div class="grow"><b>Backup</b><span>${b ? (b.ok ? `${fmtDay(Date.parse(b.at))} · ${b.bytes >= 1e6 ? `${(b.bytes / 1e6).toFixed(0)} MB` : `${Math.max(1, Math.round(b.bytes / 1e3))} KB`} · 14 kept` : `Failed: ${b.error}`) : "Every night at 03:30, kept on this Mac"}</span></div>
+        <button class="btn small" disabled=${!!busy} onClick=${() => act("backup", (r) => (r.ok ? "Backed up" : `Backup failed: ${r.error}`))}>${busy === "backup" ? "Backing up…" : "Back up now"}</button></div>
+      ${h ? html`<div class="row"><div class="grow"><b>Running</b><span>Up ${dur(h.uptimeSeconds * 1000)} · ${h.engines.running} engine${h.engines.running === 1 ? "" : "s"} · ${h.diskFreeGB} GB free · v${h.version}</span></div></div>` : null}
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap">
+      <button class="btn small" disabled=${!!busy} onClick=${checkAccess}>${busy === "check" ? "Checking… (macOS may ask for permission)" : "Check Mac access"}</button>
+      ${access ? html`<span class="hint">${access.passed}/${access.total} working</span>` : null}
+    </div>
+    ${access
+      ? html`<div class="list access-list">${access.checks.map((c) => html`<div class="row">
+          <span class="state-dot" style=${c.ok ? "" : "color:var(--danger)"}><${c.ok ? I.okCircle : I.xCircle} /></span>
+          <div class="grow"><b>${c.name}</b><span>${c.ok ? c.detail : c.fix || c.detail}</span></div>
+        </div>`)}</div>`
+      : html`<p class="hint">Tries Calendar, Reminders, Contacts, Mail, file search, screen recording, mouse control and voice for real (a test event and reminder are made and deleted). Run it once on the Blip Mac after setup.</p>`}
+    <p class="hint">Stuck? <b>Recover</b> stops tasks and restarts the engines and the browser; nothing is lost. <b>Reset</b> also starts a fresh chat for every bot (memory, routines and secrets stay).</p>
+    <div style="display:flex;gap:8px;flex-wrap:wrap">
+      <button class="btn" disabled=${!!busy} onClick=${() => act("recover")}>${busy === "recover" ? "Recovering…" : "Recover"}</button>
+      <button class=${`btn ${armed ? "danger" : ""}`} disabled=${!!busy} onClick=${() => {
+        if (!armed) { setArmed(true); setTimeout(() => setArmed(false), 4000); return; }
+        act("reset", null, { confirm: "RESET" });
+      }}>${busy === "reset" ? "Resetting…" : armed ? "Tap again to reset" : "Reset"}</button>
+    </div>
+    <${HeartbeatRow} h=${h} reload=${reload} />`;
+}
+
 function SettingsSheet({ st, onClose }) {
   const [rules, reloadRules] = useLoad(() => api("/rules"), []);
   const [connectors, reloadConnectors] = useLoad(() => api("/connectors"), []);
@@ -1590,8 +1916,11 @@ function SettingsSheet({ st, onClose }) {
 
     <div class="section-title">Safety</div>
     <div class="toggle-row"><div class="grow"><b>Full access</b><span>Bots act on their own: terminal, files, clicks, sending, deleting. Only payments, protected files and your Ask-first rules still ask.</span></div><${Switch} on=${st.settings.fullAccess} onChange=${(v) => set({ fullAccess: v })} /></div>
+    <div class="toggle-row"><div class="grow"><b>Double-check results</b><span>After a task that changes files, your calendar, reminders, routines or skills, an independent checker confirms it really happened. You only hear about it if it didn't.</span></div><${Switch} on=${st.settings.verify !== false} onChange=${(v) => set({ verify: v })} /></div>
     <div class="toggle-row"><div class="grow"><b>Auto Review</b><span>An independent AI checks risky actions and only asks you when it matters.</span></div><${Switch} on=${st.settings.autoReview} onChange=${(v) => set({ autoReview: v })} /></div>
-    <div class="toggle-row"><div class="grow"><b>Proactive suggestions</b><span>Your primary bot looks around (read-only) a few times a day and suggests things. Max 3/day.</span></div><${Switch} on=${st.settings.proactive} onChange=${(v) => set({ proactive: v })} /></div>
+    <div class="toggle-row"><div class="grow"><b>Proactive suggestions</b><span>Your primary bot looks at your calendar, unread mail, failed routines and new files (read-only) and suggests at most 3 things a day.</span></div>
+      <${Seg} value=${!st.settings.proactive ? "off" : st.settings.proactiveMode || "thrice"} options=${[["off", "Off"], ["morning", "Mornings"], ["thrice", "3× a day"]]} onChange=${(v) => set(v === "off" ? { proactive: false } : { proactive: true, proactiveMode: v })} /></div>
+    <p class="hint" style="margin-top:-4px"><button class="linkish" onClick=${() => api("/proactive/run", { method: "POST" }).then((r) => toast(r.started ? "Checking now; it shows in your primary bot's chat" : "Your primary bot is busy; try again in a minute")).catch(fail)}>Check now</button></p>
     <div class="toggle-row"><div class="grow"><b>Spoken replies</b><span>Read every reply aloud (voice messages always get spoken replies).</span></div><${Switch} on=${st.settings.voiceReplies} onChange=${(v) => set({ voiceReplies: v })} /></div>
 
     <div class="section-title">Always ask first</div>
@@ -1612,6 +1941,8 @@ function SettingsSheet({ st, onClose }) {
       <input class="input" type="password" autocomplete="off" placeholder="Value" value=${newSecret.value} onInput=${(e) => setNewSecret({ ...newSecret, value: e.target.value })} />
       <button class="btn small primary" disabled=${!newSecret.name.trim() || !newSecret.value}>Save</button>
     </form>
+
+    <${HealthSection} />
 
     <div class="section-title">Connected apps</div>
     ${connectors?.length
@@ -1720,11 +2051,15 @@ function BotSheet({ bot, st, onClose, onStyle }) {
       <div class="field" style="flex:1"><label>Name</label><input class="input" value=${form.name} onInput=${f("name")} /></div>
     </div>
     <div class="field"><label>Job</label><textarea class="input" value=${form.job} onInput=${f("job")} /></div>
-    <div class="field"><label>Personality</label><input class="input" value=${form.style} onInput=${f("style")} /></div>
+    <div class="field"><label>Extra style (optional)</label><input class="input" value=${form.style} onInput=${f("style")} placeholder="e.g. Talks like a trader" /></div>
     <button class="btn primary" onClick=${() => patch(form).then((ok) => ok && toast("Saved"))}>Save</button>
+    <div class="section-title" style="margin-top:22px">Personality</div>
+    <${Seg} value=${bot.spice || "medium"} options=${[["low", "Professional"], ["medium", "Blip"], ["high", "Spicy"]]} onChange=${(v) => patch({ spice: v })} />
+    <p class="hint">${{ low: "Straight to the point, no jokes.", medium: "Sharp, direct, the occasional dry line. The default.", high: "More opinions, more attitude. Still never careless with your money or approvals." }[bot.spice || "medium"]}</p>
     <div class="section-title" style="margin-top:22px">Model</div>
     <${Seg} value=${alias} options=${[["auto", "Auto"], ["opus", "Opus"], ["sonnet", "Sonnet"], ["haiku", "Haiku"]]} onChange=${(v) => patch({ model: v })} />
     <p class="hint">Auto answers quick chat on Sonnet and gives real jobs (research, browsing, building, email) to Opus. Context used: ${Math.round(bot.contextTokens / 1000)}k tokens. Long chats cost more per message — start a new chat to reset (memory is kept).</p>
+    <div class="toggle-row"><div class="grow"><b>Own browser</b><span>Browses at the same time as your other bots instead of taking turns. Starts with a copy of your logins; sign-ins you do later in it stay with this bot.</span></div><${Switch} on=${bot.ownBrowser} onChange=${(v) => patch({ ownBrowser: v })} /></div>
     <div class="toggle-row"><div class="grow"><b>Quiet</b><span>Deliver this bot's messages without sound. Approvals still notify.</span></div><${Switch} on=${bot.quiet} onChange=${(v) => patch({ quiet: v })} /></div>
     <div class="toggle-row"><div class="grow"><b>Primary bot</b><span>Runs proactive check-ins and offers to help.</span></div>${st.primaryBotId === bot.id ? html`<span class="chip">Primary</span>` : html`<button class="btn small" onClick=${() => patch({ primary: true })}>Make primary</button>`}</div>
     <div style="display:flex;gap:8px;margin-top:18px;flex-wrap:wrap">
@@ -1869,11 +2204,13 @@ function Shell() {
   }, []);
 
   return html`<div class=${`shell ${panel ? "with-panel" : ""}`}>
+    <${OfflineBanner} />
+    <${TeachBanner} st=${st} setControl=${setControl} />
     <${Sidebar} st=${st} open=${sidebar} onSelect=${select} onSheet=${(x) => { setSheet(x); setSidebar(false); }} onClose=${() => setSidebar(false)} />
     <${ChatView} st=${st} bot=${bot} onMenu=${() => setSidebar(true)} panel=${panel} setPanel=${setPanel} onSheet=${setSheet} onImage=${setLightbox} setControl=${setControl} />
     ${panel ? html`<${Panel} tab=${panel} setTab=${setPanel} bot=${bot} onClose=${() => setPanel(null)} onImage=${setLightbox} control=${control} setControl=${setControl} />` : null}
     ${sheet?.type === "routines" ? html`<${RoutinesSheet} st=${st} botId=${bot.id} onClose=${() => setSheet(null)} />` : null}
-    ${sheet?.type === "skills" ? html`<${SkillsSheet} botId=${bot.id} onClose=${() => setSheet(null)} />` : null}
+    ${sheet?.type === "skills" ? html`<${SkillsSheet} setControl=${setControl} botId=${bot.id} onClose=${() => setSheet(null)} />` : null}
     ${sheet?.type === "activity" ? html`<${ActivitySheet} onClose=${() => setSheet(null)} />` : null}
     ${sheet?.type === "settings" ? html`<${SettingsSheet} st=${st} onClose=${() => setSheet(null)} />` : null}
     ${sheet?.type === "newbot" ? html`<${NewBotSheet} onClose=${() => setSheet(null)} onCreated=${(id, custom) => loadState().then(() => { select(id); if (custom) setSheet({ type: "style" }); })} />` : null}
@@ -1883,6 +2220,33 @@ function Shell() {
     ${lightbox ? html`<div class="lightbox" onClick=${() => setLightbox(null)}><img src=${lightbox} alt="" /></div>` : null}
     ${s.toast ? html`<div class="toast">${s.toast}</div>` : null}
   </div>`;
+}
+
+const sinceText = (t) => {
+  const d = new Date(t);
+  const today = new Date().toDateString() === d.toDateString();
+  return today ? fmtTime(t) : fmtDay(t);
+};
+
+/** Opened while the Mac is unreachable: say so plainly, keep retrying. */
+function OfflineScreen() {
+  useNow(true, 30_000);
+  return html`<div class="offline-screen">
+    <${Blip} size=${72} state="sleep" />
+    <h1>Your Mac isn't reachable</h1>
+    <p>Since ${sinceText(offlineSince)}. Blip keeps trying and picks up the moment it's back.</p>
+    <ul class="hint">
+      <li>Is the Mac on, awake and on the charger?</li>
+      <li>Is it connected to the internet, with Tailscale on?</li>
+      <li>After a restart, Blip starts by itself once you're logged in.</li>
+    </ul>
+  </div>`;
+}
+
+function OfflineBanner() {
+  useNow(!!offlineSince, 2000);
+  if (!offlineSince || Date.now() - offlineSince < 8000) return null; // ignore blips while it restarts
+  return html`<div class="offline-banner" role="status">Mac offline since ${sinceText(offlineSince)} · retrying</div>`;
 }
 
 function App() {
@@ -1948,6 +2312,7 @@ function App() {
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [authed]);
+  if (authed === null && offlineSince) return html`<${OfflineScreen} />`;
   if (authed === null) return html`<div class="boot"><${Blip} size=${48} state="working" /></div>`;
   if (!authed) return html`<${Login} onDone=${boot} />${s.toast ? html`<div class="toast">${s.toast}</div>` : null}`;
   if (!s.state) return html`<div class="boot"><${Blip} size=${48} state="working" /></div>`;

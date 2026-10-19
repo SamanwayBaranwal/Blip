@@ -23,6 +23,14 @@ export function setEngines(e: Engines) {
 
 export const computerHolder = () => holder;
 
+/** Recover: forget who holds the computer and turn away everyone waiting (their tasks were stopped). */
+export function resetComputer() {
+  holder = undefined;
+  lastUser = undefined;
+  granting = false;
+  for (const w of waiters.splice(0)) w.reject(new Error("stopped"));
+}
+
 /** Who is in the way of this run using the computer right now, if anyone. */
 function blocker(run: Run): string | undefined {
   if (holder) return holder.runId === run.runId ? undefined : holder.botName;

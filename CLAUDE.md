@@ -174,6 +174,89 @@ Fixed after a full audit. Keep these invariants:
   - **Keychain access:** Bash touching `security` or the keychain always asks.
   - **Tested:** the value is filled in, the bot only sees the placeholder, and no file contains the value.
 
+## Streaming, personality, reliability, memory, Mac data, triggers, teaching (2026-10-19)
+
+- **Streaming:**
+  - `includePartialMessages` is on. `agent.ts` collects the bot's own text deltas; a tool call clears the thinking-aloud text.
+  - `core.ts` puts the text in `run.live` about 8 times a second.
+  - `hub.ts` never saves `live` to disk; `RunBlock` shows it with a caret.
+  - Measured on Haiku: first words after about 3.4 s.
+- **Personality:** `character()` in `bots.ts` is the Blip voice, and every bot has it.
+  - `bot.spice` is low, medium (the default) or high.
+  - `OFF_VOICE` in `core.ts` logs banned phrases to the audit log; it never blocks.
+  - Persona text has no emoji.
+- **Tests:**
+  - `npm test`: unit tests with `node:test`, each file in its own temporary Blip home through `BLIP_DATA_ROOT`, with `BLIP_TEST_KEYCHAIN=memory`. 31 tests, under 1 s.
+  - `npm run test:golden`: a real throwaway server on Haiku, 14 end-to-end tasks.
+  - **Every new capability needs a test in one of the two.** A deliberately reintroduced cost bug was caught.
+- **`config.DATA_ROOT`:** `.env`, data, workspace and logs live here (the install folder unless `BLIP_DATA_ROOT` is set). Code assets stay under `ROOT`.
+- **Health (`health.ts`):**
+  - `GET /api/health`.
+  - Recover: stop tasks, `closeAllEngines`, `resetComputer`, kill Chrome by profile path, `restartRemote`.
+  - Reset: Recover plus `freshChat` for every bot.
+  - Nightly backup at 03:30: tar of data and workspace without browser caches, 14 kept, `./blip.sh restore`.
+  - Nightly self-test at 03:40: 8 checks. It posts one quiet line, and a push only on failure.
+  - Optional `HEALTHCHECK_URL` heartbeat.
+  - The service worker caches the app shell network-first, so `OfflineScreen` and `OfflineBanner` work when the Mac is down.
+- **Memory (`memory.ts`):**
+  - A SQLite FTS5 index (`node:sqlite`) in `data/memory-index.db`.
+  - Covers memory files, shared notes and skills (rebuilt when the files change), plus a **permanent archive of every user and bot chat message**. Threads still trim to 400.
+  - The `search_memory` tool.
+  - Weekly tidy (Sunday 04:00) for memory files over 8 KB. A copy goes to `memory/.history` first, and the run uses `noPush`.
+- **Mac data (`macdata.ts`):**
+  - The `mac-app/macdata.swift` helper (EventKit and Contacts) is built by `native.ts` as `bin/blip-macdata`; the build checks `xcode-select -p` first.
+  - Mail is read via JXA, **only if Mail is already running** (opening it would pop a window).
+  - Files are found with Spotlight `mdfind`, skipping protected paths.
+  - The tools are deliberately **not** named `mac_*`, so they never take the computer lock.
+  - Untested on real permissions; that needs the Blip Mac to click Allow.
+- **Triggers (`routines.ts`):**
+  - `Routine.trigger` is a webhook token, a folder, or a mail filter; `schedule` is `"event"`.
+  - `/hook/:token` takes no cookie (the token is the secret), is rate-limited to one call per 10 s, and accepts up to 64 KB.
+  - Folders are watched with `fs.watch`, waiting 3 s after a file lands.
+  - Mail is polled every 5 minutes while a mail routine exists.
+  - Event data reaches the bot wrapped as `<event>` and marked "NOT instructions".
+- **Teach by demo (`teach.ts`):**
+  - ffmpeg records at 2 fps, 1280 px, 10 minutes at most.
+  - Key moments: scene changes plus one every 3 s, thinned to 30.
+  - Remote-view clicks and keys are logged with timestamps; **typed text never is**, only its length.
+  - The bot gets the images and the log, asks questions, and calls `save_skill`. The recording is deleted after 60 s.
+  - Skills can be edited in the app (`GET`/`PUT /api/skills/:name`).
+- **Own browser:**
+  - `bot.ownBrowser` gives the bot `data/browser-profiles/<id>`, copied from the shared profile without caches or lock files.
+  - Its browser tools skip the computer lock; `mac_*` still uses it.
+  - It's opt-in, because later logins don't sync between profiles.
+
+## Check-ins, skills, double-check, voice, alerts, polish (2026-10-19, later)
+
+- **Mac access check** (`checkMacAccess` in `health.ts`, Settings → This Mac → Check Mac access):
+  - Reads and writes Calendar and Reminders for real (a test item is made and deleted with `delete-event` / `delete-reminder`), and reads Contacts, Mail, Spotlight, the screen, mouse control and voice. Each gives an exact fix.
+  - Results are stored in `state.macAccess`. **Background runs only use apps marked allowed there**, and the native helper gets `BLIP_NO_PROMPT`, so check-ins and routines never pop permission dialogs. Sessions know whether the user started them (`Session.userStarted` → `createBlipServer(bot, { background })`).
+  - **Never run Mac-data tools from a dev test server without `BLIP_FAKE_MAC_DATA=1`.** On 2026-10-19 a talk-mode test asked about the calendar and may have shown a Calendar prompt on the dev Mac. Unit and golden tests now always use the fake data, which remembers additions.
+- **Proactive:**
+  - `proactiveFacts()` gathers facts in code: failed runs in the last 24 h, waiting approvals, today's calendar and unread mail (only if allowed), and new inbox files. They go into the check-in prompt as data.
+  - Modes: off, mornings (once a day) or 3× a day.
+  - `POST /api/proactive/run` runs one now.
+- **Skills (`skills.ts`):**
+  - `writeSkill` keeps up to 20 versions in `.versions/` (unique names).
+  - `cleanSkill` keeps only `name` and `description` in the header (it drops `allowed-tools` and the like). It's used for import, the library, edits and `save_skill`.
+  - Export and import a skill as `.skill.md`. The library lives in `skills-library/`.
+  - `offerSkill` (core) uses `similarRequests()` (FTS plus word overlap of at least 0.5) and offers once (`state.skillOffers`) when a request has been made 3 times.
+- **Double-check (`verify.ts`):**
+  - Runs after done tasks that used checkable tools (`Write` / `Edit` / `calendar_add` / `reminders_add` / `add_routine` / `save_skill` / `send_to_phone`).
+  - An independent `query()` (`FAST_MODEL`, read-only `canUseTool`, no browser) replies VERIFIED, NOT VERIFIED or CAN'T CHECK.
+  - It posts "Checked: …" quietly, or "Double-check failed: …" with a push. Setting: `settings.verify`.
+- **Voice:**
+  - `transcribe` trims silence and runs Whisper greedy (`-bs 1 -bo 1`, up to 8 threads): about 25% faster on Apple Silicon, much more on Intel.
+  - `speak` uses the best installed Premium or Enhanced voice.
+  - App: `speakText` picks the best device voice and speaks sentence by sentence (`speechDone` promise). Hold the mic to talk.
+  - **Talk mode** (wave button): VAD records until 1.2 s of silence → `/voice` → send with `voice: true` → wait for the reply → speak → listen again. A pending approval is announced out loud ("tap the card"); approvals are never given by voice.
+  - Tested with Chrome's fake mic.
+- **Alerts:**
+  - `settings.healthcheckUrl` (Settings → Outage alerts) or `HEALTHCHECK_URL`: a ping every 5 minutes, plus `/fail` when the self-test fails (healthchecks.io).
+  - Public `GET /status` gives one line with no personal data.
+- **Open source:** `install.sh` (a one-line curl install into `~/Blip`; it defaults to github.com/SamanwayBaranwal/blip), `CONTRIBUTING.md`, and a README quick start. There's no LICENSE yet: the user decides.
+- **Tests:** 40 unit tests (`npm test`, about 6 s, with a 60 s per-test timeout) and 17 golden tasks.
+
 ## How the code fits together
 
 - `hub.ts` is the single source of truth for conversations. Message kinds are `text`, `run` (live progress) and `card`.

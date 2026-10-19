@@ -4,7 +4,8 @@ import type { IncomingMessage, Server } from "node:http";
 import path from "node:path";
 import { promisify } from "node:util";
 import { WebSocket, WebSocketServer } from "ws";
-import { ROOT } from "./config.js";
+import { buildHelper, helperPath } from "./native.js";
+import { noteInput } from "./teach.js";
 import * as mac from "./mac.js";
 import * as screen from "./screen.js";
 
@@ -20,29 +21,9 @@ const dryRun = () => !!process.env.BLIP_INPUT_DRYRUN;
 const UTF8 = { ...process.env, LANG: "en_US.UTF-8", LC_ALL: "en_US.UTF-8" };
 
 // ================================================================ input helper
-const HELPER_SRC = path.join(ROOT, "mac-app", "input.swift");
-const HELPER_BIN = path.join(ROOT, "bin", "blip-input");
+const HELPER_BIN = helperPath("blip-input");
 let helper: ChildProcess | undefined;
 let trusted: boolean | undefined; // macOS Accessibility permission, as the helper sees it
-let building: Promise<void> | undefined;
-
-/** Builds the helper when it's missing or older than its source (needs Apple's command line tools). */
-function buildHelper() {
-  building ??= (async () => {
-    try {
-      const fresh = fs.existsSync(HELPER_BIN) && fs.statSync(HELPER_BIN).mtimeMs >= fs.statSync(HELPER_SRC).mtimeMs;
-      if (fresh) return;
-      // Without the command line tools, /usr/bin/swiftc pops up an install dialog: check first, never surprise.
-      await run("/usr/bin/xcode-select", ["-p"]);
-      fs.mkdirSync(path.dirname(HELPER_BIN), { recursive: true });
-      await run("/usr/bin/swiftc", ["-O", HELPER_SRC, "-o", HELPER_BIN], { timeout: 180_000 });
-      console.log("Built the remote-control input helper.");
-    } catch (error) {
-      console.error("Remote input helper not built (falling back to cliclick):", (error as Error).message.split("\n")[0]);
-    }
-  })();
-  return building;
-}
 
 function startHelper() {
   if (helper && helper.exitCode === null) return helper;
@@ -72,6 +53,11 @@ let fallbackChain: Promise<unknown> = Promise.resolve();
 
 /** Performs one input event on the Mac, in order. */
 export function input(m: InputMsg) {
+  // During a teach-by-demo recording, note clicks and keys (never the text typed: it may be a password).
+  if (m.t === "pointer" && m.a !== "move" && m.a !== "drag") noteInput(`${m.a} at ${Math.round(n(m.x) * 100)}% across, ${Math.round(n(m.y) * 100)}% down`);
+  else if (m.t === "key") noteInput(`pressed ${String(m.keys).slice(0, 30)}`);
+  else if (m.t === "type") noteInput(`typed ${String(m.text).length} characters`);
+  else if (m.t === "wheel") noteInput("scrolled");
   if (dryRun()) {
     const what = m.t === "pointer" ? `${m.a} ${n(m.x).toFixed(3)},${n(m.y).toFixed(3)}` : m.t === "wheel" ? `scroll ${Math.round(m.dx)},${Math.round(m.dy)}` : m.t === "type" ? `type ${JSON.stringify(m.text)}` : `key ${m.keys}`;
     return void console.log("[input]", what);
@@ -99,6 +85,20 @@ export function input(m: InputMsg) {
 }
 
 export const inputBlocked = () => trusted === false && !dryRun();
+
+/** For the health check and Recover. */
+export const remoteStats = () => ({
+  inputHelper: !!helper && helper.exitCode === null,
+  inputHelperBuilt: fs.existsSync(HELPER_BIN),
+  accessibility: trusted ?? null,
+  videoStreams: encoders.size,
+});
+export function restartRemote() {
+  helper?.kill();
+  helper = undefined;
+  for (const enc of encoders.values()) enc.proc?.kill("SIGTERM");
+  encoders.clear();
+}
 
 // ================================================================ clipboard
 export async function getClipboard() {
@@ -271,7 +271,7 @@ async function watchVideo(viewer: VideoViewer, q: { w: number; fps: number; kbps
 
 // ================================================================ the WebSocket
 export function attachRemote(server: Server, signedIn: (req: IncomingMessage) => boolean) {
-  void buildHelper().then(() => startHelper());
+  void buildHelper("input", "blip-input").then(() => startHelper());
   const wss = new WebSocketServer({ noServer: true, maxPayload: 512 * 1024 });
   server.on("upgrade", (req, socket, head) => {
     if (!req.url?.startsWith("/api/remote")) return socket.destroy();

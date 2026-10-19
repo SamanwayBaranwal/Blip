@@ -11,6 +11,9 @@ const SERVICE = "Blip";
 export const PLACEHOLDER = /\{\{\s*secret:([a-z0-9][a-z0-9_.-]{0,39})\s*\}\}/gi;
 const values = new Map<string, string>(); // in memory, for filling in and scrubbing
 
+// Tests use a pretend Keychain held in memory (BLIP_TEST_KEYCHAIN=memory), so they never touch the real one.
+const fakeKeychain = process.env.BLIP_TEST_KEYCHAIN === "memory" ? new Map<string, string>() : undefined;
+
 export const cleanName = (name: string) => name.trim().toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 40);
 export const hasSecret = (name: string) => state.secrets.some((s) => s.name === cleanName(name));
 export const listSecrets = () => state.secrets.map(({ name, note, createdAt, lastUsedAt }) => ({ name, note, createdAt, lastUsedAt }));
@@ -21,7 +24,8 @@ export async function saveSecret(rawName: string, value: string, note = "") {
   if (!name) throw new Error("A secret needs a name.");
   if (!value) throw new Error("The secret is empty.");
   if (/[\r\n]/.test(value)) throw new Error("A secret can't contain line breaks.");
-  await new Promise<void>((resolve, reject) => {
+  if (fakeKeychain) fakeKeychain.set(name, value);
+  else await new Promise<void>((resolve, reject) => {
     const p = spawn("/usr/bin/security", ["add-generic-password", "-U", "-s", SERVICE, "-a", name, "-l", `Blip: ${name}`, "-w"], { stdio: ["pipe", "ignore", "pipe"] });
     let err = "";
     p.stderr.on("data", (d: Buffer) => (err += d.toString()));
@@ -37,6 +41,7 @@ export async function saveSecret(rawName: string, value: string, note = "") {
 
 async function readSecret(name: string): Promise<string | undefined> {
   if (values.has(name)) return values.get(name);
+  if (fakeKeychain) return fakeKeychain.get(name);
   try {
     const { stdout } = await run("/usr/bin/security", ["find-generic-password", "-s", SERVICE, "-a", name, "-w"]);
     const value = stdout.replace(/\n$/, "");
@@ -49,10 +54,31 @@ async function readSecret(name: string): Promise<string | undefined> {
 
 export async function deleteSecret(rawName: string) {
   const name = cleanName(rawName);
-  await run("/usr/bin/security", ["delete-generic-password", "-s", SERVICE, "-a", name]).catch(() => {});
+  if (fakeKeychain) fakeKeychain.delete(name);
+  else await run("/usr/bin/security", ["delete-generic-password", "-s", SERVICE, "-a", name]).catch(() => {});
   values.delete(name);
   state.secrets = state.secrets.filter((s) => s.name !== name);
   save();
+}
+
+/** For the self-test: can a value be written to and read back from the Keychain? (Uses its own test entry.) */
+export async function keychainWorks() {
+  if (fakeKeychain) return true;
+  const probe = `ok-${Date.now()}`;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const p = spawn("/usr/bin/security", ["add-generic-password", "-U", "-s", SERVICE, "-a", "blip-selftest", "-w"], { stdio: ["pipe", "ignore", "ignore"] });
+      p.on("error", reject);
+      p.on("exit", (code) => (code === 0 ? resolve() : reject(new Error(String(code)))));
+      p.stdin.end(`${probe}\n${probe}\n`);
+    });
+    const { stdout } = await run("/usr/bin/security", ["find-generic-password", "-s", SERVICE, "-a", "blip-selftest", "-w"]);
+    return stdout.trim() === probe;
+  } catch {
+    return false;
+  } finally {
+    await run("/usr/bin/security", ["delete-generic-password", "-s", SERVICE, "-a", "blip-selftest"]).catch(() => {});
+  }
 }
 
 /** Loads every saved secret into memory, so tool output can be scrubbed even before one is used. */
