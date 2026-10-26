@@ -78,11 +78,14 @@ type State = {
   owner?: { email: string; lastEmailAt?: string };
   reachUrl?: string; // the last anywhere-link (to notice when it changes)
   loginLinks?: { hash: string; expires: number }[]; // one-time sign-in links (hashes only)
-  setupDone?: boolean; // the first-run "Use Blip on your phone" steps were finished or skipped
+  setupDone?: boolean;
+  /** Chat lock: a passcode (salted scrypt hash), the locked chats, and whether the whole app locks on open. */
+  lock?: { salt: string; hash: string; digits: number; chats: string[]; app: boolean }; // digits: so the keypad knows when you're done // the first-run "Use Blip on your phone" steps were finished or skipped
   /** What the Mac access check found working (background runs only use these, so they never trigger a prompt). */
   macAccess?: { calendar?: boolean; reminders?: boolean; contacts?: boolean; mail?: boolean; at?: string };
   lastProactiveDay?: string;
   skillOffers?: string[];
+  lastSkillOfferAt?: string;
   skillUse?: Record<string, { at: string; count: number }>; // when each skill was last used
   lastProactiveAt?: string; // the last check-in (for the app's status strip) // requests Blip already offered to turn into a skill (not offered again)
   groups: Group[];

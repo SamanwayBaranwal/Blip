@@ -29,6 +29,7 @@ const inputError = (error: unknown) =>
   /not permitted|accessibility|assistive|1002|-25211/i.test(String((error as Error)?.message))
     ? "macOS blocked control. On the Blip Mac: System Settings → Privacy & Security → Accessibility → turn on node, then ./blip.sh restart"
     : (error as Error).message;
+import { checkPin, lockView, removeLock, setAppLock, setChatLock, setPin } from "./lock.js";
 import { addSubscription, pushPublicKey } from "./notify.js";
 import { cloudflaredPath, newLoginLink, qrSvg, reachStatus, sendLinkEmail, setReach, tailscalePath, useLoginLink } from "./reach.js";
 import { addRule, describeRule, inside, isSensitive } from "./permissions.js";
@@ -142,6 +143,7 @@ function appState() {
     teach: teachStatus(),
     anywhere: { status: reachStatus().status, url: reachStatus().url ?? null, permanent: reachStatus().permanent },
     setupDone: !!state.setupDone,
+    lock: lockView(),
     lastCheckIn: state.lastProactiveAt ?? null,
     nextRoutine: nextRoutine(),
     groups: state.groups.map((g) => ({
@@ -269,6 +271,29 @@ export function startWeb() {
   });
 
   api.get("/state", (_req, res) => void res.json(appState()));
+
+  // ---- chat lock (passcode, locked chats, lock the app on open)
+  const lockRoute = (fn: (req: Request) => void) => (req: Request, res: Response) => {
+    try {
+      fn(req);
+      stateChanged();
+      res.json(lockView());
+    } catch (error) {
+      res.status(400).json({ error: (error as Error).message });
+    }
+  };
+  api.get("/lock", (_req, res) => void res.json(lockView()));
+  api.post("/lock/pin", lockRoute((req) => setPin(str(req.body.pin, 12), req.body.current === undefined ? undefined : str(req.body.current, 12))));
+  api.post("/lock/check", (req, res) => {
+    try {
+      res.json({ ok: checkPin(str(req.body.pin, 12)) });
+    } catch (error) {
+      res.status(429).json({ error: (error as Error).message });
+    }
+  });
+  api.post("/lock/chat", lockRoute((req) => setChatLock(str(req.body.id, 64), !!req.body.locked, req.body.pin === undefined ? undefined : str(req.body.pin, 12))));
+  api.post("/lock/app", lockRoute((req) => setAppLock(!!req.body.on, req.body.pin === undefined ? undefined : str(req.body.pin, 12))));
+  api.post("/lock/remove", lockRoute((req) => removeLock(str(req.body.pin, 12))));
 
   // ---- use Blip anywhere: the public link, the owner's email, the QR code to scan
   const reachView = () => ({ ...reachStatus(), tools: { cloudflare: !!cloudflaredPath(), tailscale: !!tailscalePath() }, agentEmail: state.email?.address ?? null, setupDone: !!state.setupDone });

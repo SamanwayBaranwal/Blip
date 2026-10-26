@@ -88,6 +88,142 @@ function Toast({ t }) {
     ${t.action ? html`<button class="toast-act" onClick=${() => { hideToast(); Promise.resolve(t.action.run()).catch(fail); }}>${t.action.label}</button>` : null}
   </div>`;
 }
+// ============================================================ chat lock
+// Which locked chats (and whether the app) are open right now. Kept in memory only: a reload, or a minute in
+// the background, locks them again.
+const unlocked = new Set();
+let appUnlocked = false;
+let hiddenAt = 0;
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) return void (hiddenAt = Date.now());
+  if (hiddenAt && Date.now() - hiddenAt > 60_000) {
+    unlocked.clear();
+    appUnlocked = false;
+    emit();
+  }
+});
+const lockedChats = () => store.state?.lock?.chats || [];
+const isLocked = (id) => lockedChats().includes(id) && !unlocked.has(id);
+/** A locked chat's task names aren't shown anywhere outside it (strip, control center, search). */
+const maskLabel = (chatId, label) => (isLocked(chatId) ? "Locked chat" : label);
+
+// Face ID / Touch ID: a passkey on this device, used only to open the lock here (the passcode always works).
+const b64 = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const unb64 = (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0));
+const bioKey = () => { try { return localStorage.getItem("blip-bio") || ""; } catch { return ""; } };
+const bioAvailable = async () => !!(window.isSecureContext && window.PublicKeyCredential && (await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable().catch(() => false)));
+async function enrollBio() {
+  const cred = await navigator.credentials.create({ publicKey: {
+    challenge: crypto.getRandomValues(new Uint8Array(32)), rp: { name: "Blip" },
+    user: { id: crypto.getRandomValues(new Uint8Array(16)), name: "blip-lock", displayName: "Blip lock" },
+    pubKeyCredParams: [{ type: "public-key", alg: -7 }, { type: "public-key", alg: -257 }],
+    authenticatorSelection: { authenticatorAttachment: "platform", userVerification: "required", residentKey: "discouraged" }, timeout: 60_000,
+  } });
+  try { localStorage.setItem("blip-bio", b64(cred.rawId)); } catch {}
+}
+async function bioUnlock() {
+  await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), allowCredentials: [{ type: "public-key", id: unb64(bioKey()) }], userVerification: "required", timeout: 60_000 } });
+  return true;
+}
+
+/** The lock screen: Blip asleep, passcode dots, a big keypad, and Face ID / Touch ID where it's set up. */
+function LockScreen({ title, sub, onUnlock, full }) {
+  const digits = store.state?.lock?.digits || 4;
+  const [pin, setPin] = useState("");
+  const [shake, setShake] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [bio, setBio] = useState(false);
+  useEffect(() => void bioAvailable().then((ok) => setBio(ok && !!bioKey())), []);
+  const tryBio = () => bioUnlock().then(() => (buzz(10), onUnlock())).catch(() => {});
+  useEffect(() => { if (bio) tryBio(); }, [bio]);
+  const submit = (p) => {
+    setBusy(true);
+    api("/lock/check", { method: "POST", body: { pin: p } })
+      .then((r) => {
+        if (r.ok) return buzz(10), onUnlock();
+        setShake(true); buzz(60);
+        setTimeout(() => (setShake(false), setPin("")), 420);
+      })
+      .catch((e) => { fail(e); setPin(""); })
+      .finally(() => setBusy(false));
+  };
+  const press = (d) => {
+    if (busy) return;
+    const next = (pin + d).slice(0, 8);
+    setPin(next);
+    if (next.length === digits) submit(next);
+  };
+  useEffect(() => {
+    const onKey = (e) => {
+      if (/^\d$/.test(e.key)) press(e.key);
+      else if (e.key === "Backspace") setPin((p) => p.slice(0, -1));
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  });
+  return html`<div class=${`lock-screen ${full ? "full" : ""}`}>
+    <${Blip} size=${76} state="sleep" />
+    <h2>${title}</h2>
+    <p>${sub}</p>
+    <div class=${`pin-dots ${shake ? "shake" : ""}`}>${Array.from({ length: digits }, (_, i) => html`<i class=${i < pin.length ? "on" : ""} />`)}</div>
+    <div class="keypad">
+      ${["1", "2", "3", "4", "5", "6", "7", "8", "9"].map((d) => html`<button onClick=${() => press(d)}>${d}</button>`)}
+      ${bio ? html`<button class="kp-bio" onClick=${tryBio} aria-label="Face ID or Touch ID"><${I.shield} /></button>` : html`<span />`}
+      <button onClick=${() => press("0")}>0</button>
+      <button class="kp-del" onClick=${() => setPin((p) => p.slice(0, -1))} aria-label="Delete"><${I.left} /></button>
+    </div>
+  </div>`;
+}
+
+/** "Lock this chat", in a bot's or a group's settings. Taking the lock off asks for the passcode. */
+function LockToggle({ st, id }) {
+  const on = (st.lock?.chats || []).includes(id);
+  const flip = (next) => {
+    if (!st.lock?.set) return toast("Set a passcode first", { label: "Settings", run: () => ui.openSheet({ type: "settings", focus: "privacy" }) });
+    if (next) return api("/lock/chat", { method: "POST", body: { id, locked: true } }).then(() => { unlocked.delete(id); return loadState(); }).then(() => toast("Chat locked")).catch(fail);
+    const pin = prompt("Passcode to unlock this chat for good");
+    if (pin) api("/lock/chat", { method: "POST", body: { id, locked: false, pin } }).then(loadState).then(() => toast("Lock removed")).catch(fail);
+  };
+  return html`<div class="toggle-row"><div class="grow"><b>Lock this chat</b><span>Needs your passcode (or Face ID) to open. Its notifications won't show the text.</span></div><${Switch} on=${on} onChange=${flip} /></div>`;
+}
+
+/** Settings → Privacy: the passcode, the whole-app lock, Face ID on this device. */
+function PrivacySection({ st }) {
+  const lock = st.lock || {};
+  const [mode, setMode] = useState(null); // "set" | "change" | "remove"
+  const [pin, setPinText] = useState("");
+  const [current, setCurrent] = useState("");
+  const [bioOk, setBioOk] = useState(false);
+  const [bioOn, setBioOn] = useState(!!bioKey());
+  useEffect(() => void bioAvailable().then(setBioOk), []);
+  const done = (msg) => { setMode(null); setPinText(""); setCurrent(""); loadState(); toast(msg); };
+  const save = (e) => {
+    e.preventDefault();
+    if (mode === "remove") return api("/lock/remove", { method: "POST", body: { pin: current } }).then(() => done("Passcode and locks removed")).catch(fail);
+    api("/lock/pin", { method: "POST", body: { pin, current: lock.set ? current : undefined } }).then(() => done(lock.set ? "Passcode changed" : "Passcode set. Lock a chat from its settings.")).catch(fail);
+  };
+  const appLock = (on) => {
+    if (on) return api("/lock/app", { method: "POST", body: { on } }).then(() => { appUnlocked = true; loadState(); toast("Blip will ask for the passcode when it opens"); }).catch(fail);
+    const p = prompt("Passcode to turn the app lock off");
+    if (p) api("/lock/app", { method: "POST", body: { on: false, pin: p } }).then(loadState).catch(fail);
+  };
+  const toggleBio = (on) => {
+    if (!on) { try { localStorage.removeItem("blip-bio"); } catch {} return setBioOn(false); }
+    enrollBio().then(() => { setBioOn(true); toast("Face ID / Touch ID can open the lock on this device"); }).catch(() => toast("Couldn't set up Face ID / Touch ID here"));
+  };
+  return html`<div class="section-title" id="privacy">Privacy</div>
+    <div class="toggle-row"><div class="grow"><b>Chat lock passcode</b><span>${lock.set ? `On · ${lock.chats.length} locked chat${lock.chats.length === 1 ? "" : "s"}. Lock a chat from its settings (the ⋯ at the top).` : "Hide chosen chats behind a passcode, like WhatsApp's chat lock. Their notifications don't show the text."}</span></div>
+      ${lock.set ? html`<button class="btn small" onClick=${() => setMode(mode === "change" ? null : "change")}>Change</button>` : html`<button class="btn small primary" onClick=${() => setMode("set")}>Set passcode</button>`}</div>
+    ${mode ? html`<form class="type-row" onSubmit=${save}>
+        ${lock.set ? html`<input class="input" type="password" inputmode="numeric" autocomplete="off" placeholder="Current passcode" value=${current} onInput=${(e) => setCurrent(e.target.value.replace(/\D/g, ""))} />` : null}
+        ${mode !== "remove" ? html`<input class="input" type="password" inputmode="numeric" autocomplete="off" placeholder="New passcode (4 to 8 digits)" value=${pin} onInput=${(e) => setPinText(e.target.value.replace(/\D/g, ""))} autofocus />` : null}
+        <button class="btn small primary">${mode === "remove" ? "Remove" : "Save"}</button></form>` : null}
+    ${lock.set ? html`
+      <div class="toggle-row"><div class="grow"><b>Lock the whole app</b><span>Ask for the passcode every time Blip opens, and after a minute in the background.</span></div><${Switch} on=${lock.app} onChange=${appLock} /></div>
+      ${bioOk ? html`<div class="toggle-row"><div class="grow"><b>Face ID / Touch ID</b><span>Open locks on this device with your face or finger. The passcode always works too.</span></div><${Switch} on=${bioOn} onChange=${toggleBio} /></div>` : null}
+      <p class="hint"><button class="link-btn" onClick=${() => setMode("remove")}>Remove the passcode and all locks</button></p>` : null}`;
+}
+
 const buzz = (ms = 8) => { try { navigator.vibrate?.(ms); } catch {} }; // Android only; iPhone ignores it
 const fail = (e) => toast(e?.message || String(e));
 
@@ -148,6 +284,7 @@ const short = (t, n) => (t.length > n ? `${t.slice(0, n - 1).replace(/[\s,;:]+\S
 const RESULT_WORD = { file: "File saved", event: "Event added", reminder: "Reminder added", skill: "Skill saved", routine: "Routine added" };
 const resultText = (x) => [RESULT_WORD[x.kind] || "Done", x.title, x.sub].filter(Boolean).join(" · ");
 function confirmQuietly(m, prev) {
+  if (lockedChats().includes(m.botId)) return; // nothing about a locked chat pops up outside it
   const made = m.run?.results || [];
   if (made.length > (prev?.run?.results?.length || 0)) return toast(short(resultText(made.at(-1)), 90));
   if (!prev && m.role === "system" && /^Checked: /.test(m.text || "")) toast(short(m.text.replace(/\.$/, ""), 90));
@@ -165,8 +302,8 @@ function upsert(m, live) {
   }
   if (live && isNew && m.role !== "user" && (m.kind === "text" || m.kind === "card")) {
     const name = bot?.name || "Blip";
-    if (m.kind === "card") nativeNotify(m.card.type === "suggestion" ? `${name} has a suggestion` : `${name} needs you`, m.card.title);
-    else if (m.role === "bot" && m.text) nativeNotify(name, m.text, !!bot?.quiet);
+    if (m.kind === "card") nativeNotify(m.card.type === "suggestion" ? `${name} has a suggestion` : `${name} needs you`, lockedChats().includes(m.botId) ? "Open the locked chat to see it" : m.card.title);
+    else if (m.role === "bot" && m.text) nativeNotify(name, lockedChats().includes(m.botId) ? "New message" : m.text, !!bot?.quiet);
   }
   if (live && isNew && m.role === "bot" && m.kind === "text" && m.meta?.voice && m.text) speakText(m.text);
   emit();
@@ -346,6 +483,8 @@ const I = {
   copy: () => svg(html`<rect x="8" y="8" width="12" height="12" rx="2" /><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2" />`),
   users: () => svg(html`<circle cx="9" cy="9" r="3.2" /><path d="M3.5 19a5.5 5.5 0 0 1 11 0M16 6.5a3 3 0 0 1 0 5.6M18 19a5 5 0 0 0-2.4-4.3" />`),
   left: () => svg(html`<path d="M15 6l-6 6 6 6" />`),
+  share: () => svg(html`<path d="M12 15V4M8 8l4-4 4 4M6 12v6a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2v-6" />`),
+  lock: () => svg(html`<rect x="5" y="10.5" width="14" height="10" rx="2.5" /><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" />`),
 };
 const isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
 // Blip, the mascot: a mouse pointer that came alive. Its state (idle, working, needs, done, sleep) is CSS-driven.
@@ -616,7 +755,7 @@ function Sidebar({ st, open, onSelect, onSheet, onClose }) {
             <${Avatar} bot=${b} size=${36} status=${s.dot} />
             <div class="meta">
               <div class="name">${b.name}${b.id === st.primaryBotId ? html`<span class="chip" style="padding:0 6px;font-size:10.5px">Primary</span>` : null}</div>
-              <div class=${`sub ${s.cls}`}>${s.text}</div>
+              ${lockedChats().includes(b.id) ? html`<div class="sub locked"><${I.lock} /> Locked</div>` : html`<div class=${`sub ${s.cls}`}>${s.text}</div>`}
             </div>
             ${waiting ? html`<span class="badge" title="Waiting for you">${waiting}</span>` : unread ? html`<span class="badge neutral">${unread}</span>` : null}
           </button>`;
@@ -630,7 +769,7 @@ function Sidebar({ st, open, onSelect, onSheet, onClose }) {
           const unread = store.unread[g.id];
           return html`<button class=${`bot-row ${g.id === selected ? "active" : ""}`} onClick=${() => onSelect(g.id)}>
             <${Avatar} bot=${gb} size=${36} status=${s.dot} />
-            <div class="meta"><div class="name">${g.name}</div><div class=${`sub ${s.cls}`}>${g.running ? s.text : gb.job}</div></div>
+            <div class="meta"><div class="name">${g.name}</div>${lockedChats().includes(g.id) ? html`<div class="sub locked"><${I.lock} /> Locked</div>` : html`<div class=${`sub ${s.cls}`}>${g.running ? s.text : gb.job}</div>`}</div>
             ${g.waiting ? html`<span class="badge" title="Waiting for you">${g.waiting}</span>` : unread ? html`<span class="badge neutral">${unread}</span>` : null}
           </button>`;
         })}
@@ -656,13 +795,18 @@ function Sidebar({ st, open, onSelect, onSheet, onClose }) {
 }
 
 // ============================================================ messages
-function Files({ files, onImage }) {
+/** Photos and videos as a clean grid (up to 4, then "+N"), other files as chips. Tapping opens the viewer. */
+function Files({ files, onMedia }) {
   if (!files?.length) return null;
-  return html`<div class="files">${files.map((f) =>
-    isImage(f)
-      ? html`<img class="thumb" src=${fileUrl(f)} alt=${f} loading="lazy" onClick=${() => onImage(fileUrl(f))} />`
-      : html`<a class="file-chip" href=${fileUrl(f)} target="_blank" rel="noopener"><span class="ext">${(f.split(".").pop() || "").slice(0, 4)}</span><span>${f.split("/").pop()}</span></a>`,
-  )}</div>`;
+  const media = files.filter(isMedia), other = files.filter((f) => !isMedia(f));
+  const shown = media.slice(0, 4);
+  return html`<div class="files">
+    ${media.length ? html`<div class=${`media-grid n${shown.length}`}>${shown.map((f, k) => html`<button key=${f} class="media-tile" onClick=${(e) => onMedia(f, e.currentTarget.getBoundingClientRect())} aria-label=${`Open ${f.split("/").pop()}`}>
+        ${isVideo(f) ? html`<video src=${`${fileUrl(f)}#t=0.1`} muted playsinline preload="metadata" /><span class="media-play"><${I.play} /></span>` : html`<img src=${fileUrl(f)} alt="" loading="lazy" />`}
+        ${k === 3 && media.length > 4 ? html`<span class="media-more">+${media.length - 4}</span>` : null}
+      </button>`)}</div>` : null}
+    ${other.map((f) => html`<a class="file-chip" href=${fileUrl(f)} target="_blank" rel="noopener"><span class="ext">${(f.split(".").pop() || "").slice(0, 4)}</span><span>${niceName(f)}</span></a>`)}
+  </div>`;
 }
 
 function Feedback({ m }) {
@@ -684,7 +828,7 @@ function Feedback({ m }) {
   </span>`;
 }
 
-function TextMsg({ m, bot, onImage }) {
+function TextMsg({ m, bot, onMedia }) {
   if (m.role === "system") return html`<div class="msg system"><div class="text" dangerouslySetInnerHTML=${{ __html: md(m.text || "") }} /></div>`;
   const user = m.role === "user";
   // In a group (or when a teammate answers in your chat), each message shows who said it.
@@ -696,8 +840,9 @@ function TextMsg({ m, bot, onImage }) {
       ${named ? html`<div class="speaker" style=${`--bot:${botColor(speaker)}`}><i />${speaker?.name}</div>` : null}
       ${m.meta?.header ? html`<div class="header-line">${m.meta.header}</div>` : null}
       ${m.text?.trim() ? html`<div class=${`text ${m.meta?.error ? "error" : ""}`} dangerouslySetInnerHTML=${{ __html: md(m.text) }} />` : null}
-      <${Files} files=${m.files} onImage=${onImage} />
+      <${Files} files=${m.files} onMedia=${onMedia} />
       <div class=${`msg-foot ${m.meta?.feedback ? "keep" : ""}`}>
+        ${m.meta?.queued ? html`<span class="queued-tag"><${I.clock} /> Queued</span>` : m.meta?.skipped ? html`<span class="queued-tag">Not answered: the chat was stopped</span>` : null}
         ${m.meta?.voice && user ? "Voice · " : ""}${fmtTime(m.at)}
         ${m.meta?.seconds !== undefined && m.meta?.costUsd !== undefined ? html`<span>· ${dur(m.meta.seconds * 1000)}${store.state?.authMode !== "plan" ? ` · ${money(m.meta.costUsd)}` : ""}</span>` : null}
         ${!user && m.meta?.costUsd !== undefined && !m.meta?.error ? html`<${Feedback} m=${m} />` : null}
@@ -706,7 +851,7 @@ function TextMsg({ m, bot, onImage }) {
   </div>`;
 }
 
-function RunBlock({ m, bot: chatBot }) {
+function RunBlock({ m, bot: chatBot, quote }) {
   const r = m.run;
   const bot = (r.bot && botById(r.bot)) || (chatBot.group ? chatBot.lead : chatBot); // whose task this is
   const live = r.status === "running" || r.status === "waiting";
@@ -739,7 +884,7 @@ function RunBlock({ m, bot: chatBot }) {
         <div class="body"><div class="text" dangerouslySetInnerHTML=${{ __html: md(r.live) }} /></div>
       </div>`
     : null;
-  return html`<div class=${`run ${live ? "live" : ""} ${r.status === "waiting" ? "waiting" : ""}`}>
+  return html`${quote ? html`<div class="reply-quote"><span>Replying to</span> ${quote}</div>` : null}<div class=${`run ${live ? "live" : ""} ${r.status === "waiting" ? "waiting" : ""}`}>
     <button class="run-head" onClick=${() => setOpen(!isOpen)}>
       ${live || celebrate ? html`<${Blip} size=${32} look=${bot?.look} state=${celebrate ? "done" : r.status === "waiting" ? "needs" : "working"} />` : html`<span class="state-dot" style=${r.status === "failed" ? "color:var(--danger)" : ""}><${stateIcon || I.okCircle} /></span>`}
       <span class="label"><b class=${live && r.status !== "waiting" ? "shimmer" : ""}>${r.bot || chatBot.group ? html`<i class="who-dot" style=${`--bot:${botColor(bot)}`} />${bot?.name} · ` : ""}${title}</b><span>${sub}</span></span>
@@ -774,34 +919,142 @@ function Proof({ shots, live }) {
   const urls = shots.map((p) => fileUrl(p));
   return html`<div class="proof">
     <div class="proof-label">${live ? "Live view" : "What it did"}</div>
-    <div class="proof-row">${pick.map((i, k) => html`<button key=${shots[i]} class="proof-shot" style=${`--k:${k}`} onClick=${() => ui.openImage(urls, i)} aria-label=${`Screenshot ${i + 1} of ${shots.length}`}>
+    <div class="proof-row">${pick.map((i, k) => html`<button key=${shots[i]} class="proof-shot" style=${`--k:${k}`} onClick=${(e) => ui.openMedia(shots.map(mediaItem), i, e.currentTarget.getBoundingClientRect())} aria-label=${`Screenshot ${i + 1} of ${shots.length}`}>
       <img src=${urls[i]} alt="" loading="lazy" />
       ${k === pick.length - 1 && shots.length > 3 ? html`<span class="proof-more">+${shots.length - 3}</span>` : null}
     </button>`)}</div>
   </div>`;
 }
 
-/** Full-screen images: swipe or use the arrows; tap outside or Esc to close. */
-function Lightbox({ box, onClose }) {
-  const list = typeof box === "string" ? [box] : box.list;
-  const [i, setI] = useState(typeof box === "string" ? 0 : box.i);
-  const go = (d) => setI((x) => (x + d + list.length) % list.length);
-  const touch = useRef(0);
+/**
+ * The media viewer: photos and videos full screen, like the Photos app. It opens with a zoom from the thumbnail
+ * you tapped; swipe left/right through everything in the chat, swipe down to close, pinch or double-tap to zoom,
+ * tap once to hide the controls. Videos play in place. Share and save at the top, thumbnails along the bottom.
+ */
+const isVideo = (p) => /\.(mp4|mov|m4v|webm)$/i.test(p);
+const isMedia = (p) => isImage(p) || isVideo(p);
+/** A file's name as people know it (files you send get a time prefix on the Mac: "1793035288031-photo.jpg"). */
+const niceName = (p) => p.split("/").pop().replace(/^\d{10,}-/, "");
+const mediaItem = (p) => ({ url: fileUrl(p), kind: isVideo(p) ? "video" : "image", name: niceName(p), path: p });
+const urlItem = (url) => {
+  const p = decodeURIComponent(/[?&]path=([^&]+)/.exec(url)?.[1] || "");
+  return p ? mediaItem(p) : { url, kind: "image", name: "" };
+};
+function MediaViewer({ items, start = 0, rect, onClose }) {
+  const [i, setI] = useState(Math.min(start, items.length - 1));
+  const [chrome, setChrome] = useState(true);
+  const [closing, setClosing] = useState(false);
+  const [off, setOff] = useState({ x: 0, y: 0, anim: false }); // the swipe in progress
+  const [zoom, setZoom] = useState({ s: 1, x: 0, y: 0 });
+  const stage = useRef();
+  const g = useRef({ pts: new Map(), axis: null, start: null, pinch: null, lastTap: 0, tapTimer: 0 });
+  const item = items[i];
+  const close = () => { if (closing) return; setClosing(true); setTimeout(onClose, 200); };
+  const go = (d) => {
+    const n = i + d;
+    if (n < 0 || n >= items.length) return setOff({ x: 0, y: 0, anim: true });
+    setOff({ x: -d * window.innerWidth, y: 0, anim: true });
+    setTimeout(() => { setI(n); setZoom({ s: 1, x: 0, y: 0 }); setOff({ x: 0, y: 0, anim: false }); }, 220);
+  };
   useEffect(() => {
-    const onKey = (e) => (e.key === "Escape" ? onClose() : e.key === "ArrowRight" ? go(1) : e.key === "ArrowLeft" ? go(-1) : null);
+    const onKey = (e) => (e.key === "Escape" ? close() : e.key === "ArrowRight" ? go(1) : e.key === "ArrowLeft" ? go(-1) : null);
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [list.length]);
-  return html`<div class="lightbox" onClick=${(e) => e.target === e.currentTarget && onClose()}
-    onTouchStart=${(e) => (touch.current = e.touches[0].clientX)}
-    onTouchEnd=${(e) => { const dx = e.changedTouches[0].clientX - touch.current; if (Math.abs(dx) > 50 && list.length > 1) go(dx < 0 ? 1 : -1); }}>
-    <img key=${list[i]} src=${list[i]} alt="" onClick=${() => list.length === 1 && onClose()} />
-    ${list.length > 1
-      ? html`<button class="lb-nav prev" onClick=${() => go(-1)} aria-label="Previous"><${I.left} /></button>
-        <button class="lb-nav next" onClick=${() => go(1)} aria-label="Next"><${I.chevron} /></button>
-        <div class="lb-count">${i + 1} / ${list.length}</div>`
+  });
+  // Opening: grow out of the thumbnail that was tapped (when we know where it was).
+  const media = useRef();
+  const opened = useRef(false);
+  const flip = () => {
+    const el = media.current;
+    if (opened.current || !el || !rect) return void (opened.current = true);
+    opened.current = true;
+    const to = el.getBoundingClientRect();
+    if (!to.width) return;
+    el.style.transition = "none";
+    el.style.transform = `translate(${rect.left + rect.width / 2 - (to.left + to.width / 2)}px, ${rect.top + rect.height / 2 - (to.top + to.height / 2)}px) scale(${Math.max(rect.width / to.width, rect.height / to.height)})`;
+    requestAnimationFrame(() => requestAnimationFrame(() => { el.style.transition = ""; el.style.transform = ""; }));
+  };
+  useEffect(() => { if (item.kind === "video") flip(); }, []);
+  // Gestures: one finger swipes (or pans when zoomed); two fingers pinch; double tap zooms; single tap hides controls.
+  const onDown = (e) => {
+    const s = g.current;
+    s.pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (s.pts.size === 2) {
+      const [a, b] = [...s.pts.values()];
+      s.pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), s: zoom.s };
+    } else s.start = { x: e.clientX, y: e.clientY, zx: zoom.x, zy: zoom.y, t: Date.now() };
+    s.axis = null;
+  };
+  const onMove = (e) => {
+    const s = g.current;
+    if (!s.pts.has(e.pointerId)) return;
+    s.pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (s.pinch && s.pts.size === 2) {
+      const [a, b] = [...s.pts.values()];
+      const sc = Math.max(1, Math.min(4, (s.pinch.s * Math.hypot(a.x - b.x, a.y - b.y)) / s.pinch.d));
+      return setZoom((z) => ({ ...z, s: sc, ...(sc === 1 ? { x: 0, y: 0 } : {}) }));
+    }
+    if (!s.start) return;
+    const dx = e.clientX - s.start.x, dy = e.clientY - s.start.y;
+    if (zoom.s > 1) return setZoom((z) => ({ ...z, x: s.start.zx + dx, y: s.start.zy + dy }));
+    if (!s.axis && Math.hypot(dx, dy) > 8) s.axis = Math.abs(dx) > Math.abs(dy) ? "x" : "y";
+    if (s.axis === "x") setOff({ x: (i === 0 && dx > 0) || (i === items.length - 1 && dx < 0) ? dx / 3 : dx, y: 0, anim: false });
+    if (s.axis === "y") setOff({ x: 0, y: dy, anim: false });
+  };
+  const onUp = (e) => {
+    const s = g.current;
+    s.pts.delete(e.pointerId);
+    if (s.pinch) { if (s.pts.size < 2) s.pinch = null; return; }
+    if (!s.start) return;
+    const dx = e.clientX - s.start.x, dy = e.clientY - s.start.y;
+    const quick = Date.now() - s.start.t < 250 && Math.hypot(dx, dy) < 10;
+    s.start = null;
+    if (s.axis === "x") return Math.abs(dx) > 60 ? go(dx < 0 ? 1 : -1) : setOff({ x: 0, y: 0, anim: true });
+    if (s.axis === "y") return Math.abs(dy) > 110 ? close() : setOff({ x: 0, y: 0, anim: true });
+    if (!quick || e.target.closest("video, button, a")) return;
+    // Two taps: zoom in on that spot (or back out). One tap: show or hide the controls.
+    if (Date.now() - s.lastTap < 280 && item.kind === "image") {
+      clearTimeout(s.tapTimer);
+      s.lastTap = 0;
+      const r = stage.current.getBoundingClientRect();
+      return setZoom((z) => (z.s > 1 ? { s: 1, x: 0, y: 0 } : { s: 2.5, x: (r.width / 2 - (e.clientX - r.left)) * 1.5, y: (r.height / 2 - (e.clientY - r.top)) * 1.5 }));
+    }
+    s.lastTap = Date.now();
+    s.tapTimer = setTimeout(() => setChrome((c) => !c), 260);
+  };
+  const share = () => {
+    const abs = new URL(item.url, location.href).href;
+    if (navigator.share) navigator.share({ title: item.name, url: abs }).catch(() => {});
+    else copyText(abs, "Link copied");
+  };
+  const fade = off.y ? Math.max(0.25, 1 - Math.abs(off.y) / 500) : 1;
+  const slide = (it, k) => html`<div class="mv-slide" key=${it.url}>${
+    it.kind === "video"
+      ? html`<video ref=${k === 0 ? media : null} class="mv-media" src=${it.url} controls playsinline autoplay=${k === 0} preload="metadata" />`
+      : html`<img ref=${k === 0 ? media : null} class="mv-media" src=${it.url} alt=${it.name} draggable="false" onLoad=${k === 0 ? flip : null}
+          style=${k === 0 ? `transform:translate(${zoom.x}px,${zoom.y}px) scale(${zoom.s})` : ""} />`
+  }</div>`;
+  return html`<div class=${`mv ${closing ? "closing" : ""} ${chrome ? "" : "bare"}`} style=${`--fade:${fade}`} role="dialog" aria-label="Media viewer">
+    <div class="mv-top">
+      <button class="mv-btn" onClick=${close} aria-label="Close"><${I.close} /></button>
+      <div class="mv-title"><b>${item.name || "Photo"}</b>${items.length > 1 ? html`<span>${i + 1} of ${items.length}</span>` : null}</div>
+      <button class="mv-btn" onClick=${share} aria-label="Share"><${I.share} /></button>
+      ${item.path ? html`<a class="mv-btn" href=${fileUrl(item.path, true)} aria-label="Save"><${I.download} /></a>` : null}
+    </div>
+    <div class="mv-stage" ref=${stage} onPointerDown=${onDown} onPointerMove=${onMove} onPointerUp=${onUp} onPointerCancel=${onUp}>
+      <div class=${`mv-track ${off.anim ? "anim" : ""}`} style=${`transform:translate(${off.x}px,${off.y}px)`}>
+        ${i > 0 ? html`<div class="mv-side prev">${slide(items[i - 1], -1)}</div>` : null}
+        ${slide(item, 0)}
+        ${i < items.length - 1 ? html`<div class="mv-side next">${slide(items[i + 1], 1)}</div>` : null}
+      </div>
+      ${items.length > 1 && !coarse ? html`<button class="mv-nav prev" disabled=${i === 0} onClick=${() => go(-1)} aria-label="Previous"><${I.left} /></button>
+        <button class="mv-nav next" disabled=${i === items.length - 1} onClick=${() => go(1)} aria-label="Next"><${I.chevron} /></button>` : null}
+    </div>
+    ${items.length > 1
+      ? html`<div class="mv-thumbs">${items.map((it, k) => html`<button key=${it.url} class=${`mv-thumb ${k === i ? "on" : ""}`} onClick=${() => { setI(k); setZoom({ s: 1, x: 0, y: 0 }); }} ref=${k === i ? (el) => el?.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" }) : null}>
+          ${it.kind === "video" ? html`<video src=${`${it.url}#t=0.1`} muted playsinline preload="metadata" /><span class="mv-play-s"><${I.play} /></span>` : html`<img src=${it.url} alt="" loading="lazy" />`}
+        </button>`)}</div>`
       : null}
-    <button class="lb-close" onClick=${onClose} aria-label="Close"><${I.close} /></button>
   </div>`;
 }
 
@@ -810,7 +1063,7 @@ function ResultChip({ x, i = 0 }) {
   const inner = html`<span class="r-icon"><${Icon} /></span><span class="r-text"><b>${x.title}</b><span>${[RESULT_WORD[x.kind], x.sub].filter(Boolean).join(" · ")}</span></span>`;
   const style = `--k:${i}`;
   if (x.kind === "file" && x.path) return isImage(x.path)
-    ? html`<button class="result" style=${style} onClick=${() => ui.openImage([fileUrl(x.path)])}>${inner}</button>`
+    ? html`<button class="result" style=${style} onClick=${(e) => ui.openMedia([mediaItem(x.path)], 0, e.currentTarget.getBoundingClientRect())}>${inner}</button>`
     : html`<a class="result" style=${style} href=${fileUrl(x.path)} target="_blank" rel="noopener">${inner}</a>`;
   if (x.kind === "skill") return html`<button class="result" style=${style} onClick=${() => ui.openSheet({ type: "skills", open: x.title })}>${inner}</button>`;
   if (x.kind === "routine") return html`<button class="result" style=${style} onClick=${() => ui.openSheet({ type: "routines" })}>${inner}</button>`;
@@ -906,6 +1159,21 @@ function MessageList({ bot, messages, onImage, onTakeover }) {
   const known = useRef({ bot: null, ids: null });
   if (known.current.bot !== bot.id || (!known.current.ids && messages)) known.current = { bot: bot.id, ids: messages ? new Set(messages.map((m) => m.id)) : null };
   const fresh = (m) => known.current.ids && !known.current.ids.has(m.id);
+  // Every photo and video in this chat, in order: the viewer swipes through all of them.
+  const openMedia = (path, rect) => {
+    const all = (messages || []).flatMap((m) => (m.files || []).filter(isMedia));
+    ui.openMedia(all.map(mediaItem), Math.max(0, all.lastIndexOf(path)), rect);
+  };
+  // When several messages were queued, a reply that isn't right under its message quotes the one it answers.
+  const quoteFor = (m) => {
+    const id = m.run?.replyTo;
+    if (!id || !messages) return null;
+    const i = messages.indexOf(m);
+    const lastUser = [...messages.slice(0, i)].reverse().find((x) => x.role === "user");
+    if (!lastUser || lastUser.id === id) return null;
+    const q = messages.find((x) => x.id === id);
+    return q?.text ? short(q.text.replace(/\s+/g, " "), 80) : null;
+  };
   useEffect(() => {
     if (known.current.ids && messages) for (const m of messages) known.current.ids.add(m.id);
   });
@@ -928,9 +1196,9 @@ function MessageList({ bot, messages, onImage, onTakeover }) {
       ${messages === undefined ? html`<div class="empty">Loading…</div>` : null}
       ${messages?.length === 0 ? html`<div class="hello" style="min-height:50vh">${bot.group ? html`<${Avatar} bot=${bot} size=${112} />` : html`<${Blip} size=${104} look=${bot.look} />`}<h1>${bot.name}</h1><p>${bot.group ? `${bot.job}. ${bot.lead?.name} leads; @Name asks one bot.` : bot.job}</p></div>` : null}
       ${(messages || []).filter((m) => !inTray(m)).map((m) => html`<div key=${m.id} class=${`m-wrap ${fresh(m) ? `enter ${m.role === "user" ? "from-me" : ""}` : ""}`}>${
-        m.kind === "run" ? html`<${RunBlock} m=${m} bot=${bot} />`
+        m.kind === "run" ? html`<${RunBlock} m=${m} bot=${bot} quote=${quoteFor(m)} />`
         : m.kind === "card" ? html`<${Card} m=${m} onTakeover=${onTakeover} />`
-        : html`<${TextMsg} m=${m} bot=${bot} onImage=${onImage} />`}</div>`,
+        : html`<${TextMsg} m=${m} bot=${bot} onMedia=${openMedia} />`}</div>`,
       )}
     </div>
   </div>`;
@@ -1217,7 +1485,7 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
         ? html`<div class="attach-list">${files.map((f, i) => html`<span class="chip">${f.preview ? html`<img src=${f.preview} style="width:20px;height:20px;border-radius:4px;object-fit:cover" />` : html`<${I.clip} />`} ${f.name.slice(0, 24)}
             <button onClick=${() => { if (f.preview) URL.revokeObjectURL(f.preview); setFiles(files.filter((_, j) => j !== i)); }} aria-label="Remove">×</button></span>`)}</div>`
         : null}
-      <textarea ref=${ta} rows="1" placeholder=${bot.group ? (running ? "Steer the team while it works…" : `Message ${bot.name} (@Name asks one bot)`) : running ? `Steer ${bot.name} while it works…` : `What should ${bot.name} do?`} value=${text} onInput=${(e) => { setText(e.target.value); setCaret(e.target.selectionStart); }} onKeyUp=${(e) => setCaret(e.target.selectionStart)} onClick=${(e) => setCaret(e.target.selectionStart)} onKeyDown=${onKey} />
+      <textarea ref=${ta} rows="1" placeholder=${bot.group ? (running ? "Message the team (answered in order)…" : `Message ${bot.name} (@Name asks one bot)`) : running ? `Message ${bot.name}: it answers each in order…` : `What should ${bot.name} do?`} value=${text} onInput=${(e) => { setText(e.target.value); setCaret(e.target.selectionStart); }} onKeyUp=${(e) => setCaret(e.target.selectionStart)} onClick=${(e) => setCaret(e.target.selectionStart)} onKeyDown=${onKey} />
       <div class="composer-row">
         <button class="icon-btn" onClick=${() => fileInput.current.click()} aria-label="Attach"><${I.clip} /></button>
         <input type="file" multiple hidden ref=${fileInput} onChange=${pick} />
@@ -1241,7 +1509,7 @@ function Composer({ bot, st, onModel, preset, clearPreset }) {
 function StatusLine({ bot, st, rec }) {
   const rt = st.runtime;
   const mine = rt.running.find((r) => (bot.group ? r.threadId === bot.id : r.botId === bot.id));
-  const queued = rt.queued.filter((q) => q.botId === bot.id || (bot.group && bot.group.members.includes(q.botId))).length;
+  const queued = rt.queued.filter((q) => (q.threadId || q.botId) === bot.id).length;
   const now = useNow(!!mine, 1000);
   let tone = "", text = "", extra = null;
   if (rec) [tone, text] = ["rec", "Listening · tap the mic again, or let go, to send"];
@@ -1258,10 +1526,10 @@ function StatusLine({ bot, st, rec }) {
       : mine.kind === "check-in" ? "Checking in · read-only"
       : /^Waiting for the computer/.test(step) ? step
       : step ? `Working · ${step}` : "Thinking…";
-    text = who + text;
+    text = who + text + (queued ? ` · ${queued} queued` : "");
     tone = /^Waiting for the computer/.test(step) ? "wait" : "live";
     extra = html`<span class="status-time">${dur(now - mine.startedAt)}</span>`;
-  } else if (queued) [tone, text] = ["", `${queued} task${queued > 1 ? "s" : ""} queued · starts when a slot frees up`];
+  } else if (queued) [tone, text] = ["", `${queued} queued · answered in order`];
   return html`<div class=${`status-line ${tone}`} role="status" aria-live="polite">
     ${text ? html`<span class="s-dot" /><span class="s-text">${text}</span>${extra}` : html`<span class="s-idle">Type / for skills and commands</span>`}
   </div>`;
@@ -1946,7 +2214,10 @@ function FilesPanel({ onImage }) {
   if (!files.length) return html`<div class="empty">Files your bots create show up here.</div>`;
   return html`<div class="list">${files.map((f) => html`<div class="row">
     <span class="file-chip" style="padding:0;border:0;background:none"><span class="ext">${(f.path.split(".").pop() || "").slice(0, 4)}</span></span>
-    <button class="grow" style="text-align:left" onClick=${() => (isImage(f.path) ? onImage(fileUrl(f.path)) : window.open(fileUrl(f.path), "_blank"))}>
+    <button class="grow" style="text-align:left" onClick=${() => {
+      const media = files.filter((x) => isMedia(x.path)).map((x) => x.path);
+      isMedia(f.path) ? ui.openMedia(media.map(mediaItem), media.indexOf(f.path)) : window.open(fileUrl(f.path), "_blank");
+    }}>
       <b>${f.path.split("/").pop()}</b><span>${bytes(f.size)} · ${ago(f.mtime)} · ${f.path.split("/").slice(0, -1).join("/") || "workspace"}</span>
     </button>
     <a class="icon-btn" href=${fileUrl(f.path, true)} aria-label="Download"><${I.download} /></a>
@@ -2395,6 +2666,8 @@ function SettingsSheet({ st, onClose, focus }) {
           <button class="icon-btn" onClick=${() => api(`/connectors/${c.name}`, { method: "DELETE" }).then(reloadConnectors).catch(fail)} aria-label="Remove"><${I.trash} /></button></div>`)}</div>`
       : html`<p class="hint">None yet — ask a bot “connect my Notion”. Most sites already work through the bot's browser once you sign in.</p>`}
 
+    <${PrivacySection} st=${st} />
+
     <div class="section-title">Use Blip anywhere</div>
     <button class="row anywhere-row" onClick=${() => ui.openSheet({ type: "anywhere" })}>
       <span class=${`s-dot ${st.anywhere?.status === "on" ? "live" : st.anywhere?.status === "needs-you" ? "wait" : ""}`} />
@@ -2521,6 +2794,7 @@ function BotSheet({ bot, st, onClose, onStyle }) {
     <p class="hint">Auto answers quick chat on Sonnet and gives real jobs (research, browsing, building, email) to Opus. Context used: ${Math.round(bot.contextTokens / 1000)}k tokens. Long chats cost more per message — start a new chat to reset (memory is kept).</p>
     <div class="toggle-row"><div class="grow"><b>Own browser</b><span>Browses at the same time as your other bots instead of taking turns. Starts with a copy of your logins; sign-ins you do later in it stay with this bot.</span></div><${Switch} on=${bot.ownBrowser} onChange=${(v) => patch({ ownBrowser: v })} /></div>
     <div class="toggle-row"><div class="grow"><b>Quiet</b><span>Deliver this bot's messages without sound. Approvals still notify.</span></div><${Switch} on=${bot.quiet} onChange=${(v) => patch({ quiet: v })} /></div>
+    <${LockToggle} st=${st} id=${bot.id} />
     <div class="toggle-row"><div class="grow"><b>Primary bot</b><span>Runs proactive check-ins and offers to help.</span></div>${st.primaryBotId === bot.id ? html`<span class="chip">Primary</span>` : html`<button class="btn small" onClick=${() => patch({ primary: true })}>Make primary</button>`}</div>
     <div style="display:flex;gap:8px;margin-top:18px;flex-wrap:wrap">
       <button class="btn" onClick=${() => api(`/bots/${bot.id}/fresh`, { method: "POST" }).then(() => { toast("New chat started — memory kept"); onClose(); }).catch(fail)}><${I.new} /> New chat</button>
@@ -2605,7 +2879,7 @@ function ActivityStrip({ st }) {
   };
   const parts = [];
   if (needs.length) parts.push(html`<b class="warn">${needs.length} need${needs.length === 1 ? "s" : ""} you</b>`);
-  if (rt.running.length === 1) parts.push(html`<span>${nameOf(rt.running[0].botId)} · ${rt.running[0].label}</span>`);
+  if (rt.running.length === 1) parts.push(html`<span>${nameOf(rt.running[0].botId)} · ${maskLabel(rt.running[0].threadId, rt.running[0].label)}</span>`);
   else if (live) parts.push(html`<span>${rt.running.length} tasks running</span>`);
   if (rt.queued.length) parts.push(html`<span>${rt.queued.length} queued</span>`);
   if (!live && !needs.length && !rt.queued.length) {
@@ -2622,9 +2896,9 @@ function ActivityStrip({ st }) {
     </button>
     ${open
       ? html`<div class="strip-body">
-          ${needs.length ? html`<div class="strip-title">Needs you</div>${needs.map((p) => html`<button class="strip-row" onClick=${() => go(p.botId)}><span class="s-dot wait" /><span class="grow"><b>${p.title}</b><span>${nameOf(p.botId)}</span></span><${I.chevron} /></button>`)}` : null}
-          ${live ? html`<div class="strip-title">Running</div>${rt.running.map((r) => html`<button class="strip-row" onClick=${() => go(r.threadId || r.botId)}><span class="s-dot live" /><span class="grow"><b>${nameOf(r.botId)} · ${r.label}</b><span>${r.kind === "routine" ? "Routine · " : r.kind === "check-in" ? "Check-in · " : ""}${r.step}</span></span><span class="status-time">${dur(now - r.startedAt)}</span></button>`)}` : null}
-          ${rt.queued.length ? html`<div class="strip-title">Queued</div>${rt.queued.map((q) => html`<button class="strip-row" onClick=${() => go(q.botId)}><span class="s-dot" /><span class="grow"><b>${nameOf(q.botId)} · ${q.label}</b><span>Starts when a slot frees up</span></span></button>`)}` : null}
+          ${needs.length ? html`<div class="strip-title">Needs you</div>${needs.map((p) => html`<button class="strip-row" onClick=${() => go(p.botId)}><span class="s-dot wait" /><span class="grow"><b>${maskLabel(p.botId, p.title)}</b><span>${nameOf(p.botId)}</span></span><${I.chevron} /></button>`)}` : null}
+          ${live ? html`<div class="strip-title">Running</div>${rt.running.map((r) => html`<button class="strip-row" onClick=${() => go(r.threadId || r.botId)}><span class="s-dot live" /><span class="grow"><b>${nameOf(r.botId)} · ${maskLabel(r.threadId, r.label)}</b><span>${isLocked(r.threadId) ? "Working" : `${r.kind === "routine" ? "Routine · " : r.kind === "check-in" ? "Check-in · " : ""}${r.step}`}</span></span><span class="status-time">${dur(now - r.startedAt)}</span></button>`)}` : null}
+          ${rt.queued.length ? html`<div class="strip-title">Queued</div>${rt.queued.map((q) => html`<button class="strip-row" onClick=${() => go(q.botId)}><span class="s-dot" /><span class="grow"><b>${nameOf(q.botId)} · ${maskLabel(q.threadId, q.label)}</b><span>Starts when a slot frees up</span></span></button>`)}` : null}
           <div class="strip-title">Background</div>
           <button class="strip-row" onClick=${() => (ui.openSheet({ type: "routines" }), setOpen(false))}><span class="r-icon"><${I.repeat} /></span><span class="grow"><b>${st.nextRoutine ? `Next routine: ${st.nextRoutine.name}` : "No routines on a schedule"}</b><span>${st.nextRoutine ? `${when(st.nextRoutine.at)} · ${nameOf(st.nextRoutine.botId)}` : "Ask a bot to do something every day, or pick one in Routines"}</span></span><${I.chevron} /></button>
           <div class="strip-row static"><span class="r-icon"><${I.pulse} /></span><span class="grow"><b>Check-ins ${st.settings.proactive ? (st.settings.proactiveMode === "morning" ? "· mornings" : "· 3 times a day") : "· off"}</b><span>${st.lastCheckIn ? `Last one ${ago(Date.parse(st.lastCheckIn))}` : "None yet"}</span></span><button class="btn small" onClick=${checkNow}>Check now</button></div>
@@ -2678,12 +2952,14 @@ function ChatView({ st, bot, onMenu, panel, setPanel, onSheet, onImage, setContr
       <button class="icon-btn" onClick=${() => onSheet({ type: "bot" })} aria-label=${bot.group ? "Group settings" : "Bot settings"} title=${bot.group ? "Group settings" : "Bot settings"}><${I.more} /></button>
     </header>
     <${ActivityStrip} st=${st} />
-    <${SetupBanner} st=${st} />
+    ${isLocked(bot.id)
+      ? html`<${LockScreen} title=${`${bot.name} is locked`} sub="Enter your passcode to open this chat." onUnlock=${() => { unlocked.add(bot.id); emit(); }} />`
+      : html`<${SetupBanner} st=${st} />
     <${InstallHint} />
     <${SuggestionTray} messages=${messages} />
     <${MessageList} bot=${bot} messages=${messages} onImage=${onImage} onTakeover=${() => { setPanel("computer"); setControl(true); }} />
     ${fresh ? html`<${StarterTiles} bot=${bot} onPreset=${setPreset} />` : null}
-    <${Composer} key=${bot.id} bot=${bot} st=${st} onModel=${() => onSheet({ type: "bot" })} preset=${preset} clearPreset=${() => setPreset(null)} />
+    <${Composer} key=${bot.id} bot=${bot} st=${st} onModel=${() => onSheet({ type: "bot" })} preset=${preset} clearPreset=${() => setPreset(null)} />`}
   </main>`;
 }
 
@@ -2715,6 +2991,7 @@ function GroupSheet({ st, group, onClose, onCreated, onDeleted }) {
       <div class="grow"><b>${b.name}${b.helper ? html` <span class="chip" style="padding:0 6px;font-size:10.5px">Helper</span>` : null}</b><span>${b.job}</span></div>
       ${members.includes(b.id) ? html`<button type="button" class=${`btn small ${leadId === b.id ? "primary" : ""}`} onClick=${(e) => { e.preventDefault(); setLead(b.id); }}>${leadId === b.id ? "Lead" : "Make lead"}</button>` : null}
     </label>`)}</div>
+    ${group ? html`<${LockToggle} st=${st} id=${group.id} />` : null}
     <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
       <button class="btn primary" disabled=${!name.trim() || members.length < 2 || members.length > 6} onClick=${save}>${group ? "Save" : "Create group"}</button>
       ${group ? html`<button class="btn" onClick=${() => api(`/groups/${group.id}/fresh`, { method: "POST" }).then(() => { toast("New chat started for this group"); onClose(); }).catch(fail)}><${I.new} /> New chat</button>` : null}
@@ -2829,16 +3106,16 @@ function ControlSheet({ st, bot, onClose, onSelect }) {
     </div>
 
     ${needs.length ? html`<div class="section-title">Needs you</div>
-      <div class="list">${needs.map((p) => html`<button class="row cc-row" onClick=${() => onSelect(p.botId)}><span class="s-dot wait" /><div class="grow"><b>${p.title}</b><span>${nameOf(p.botId)} · tap to answer</span></div><${I.chevron} /></button>`)}</div>` : null}
+      <div class="list">${needs.map((p) => html`<button class="row cc-row" onClick=${() => onSelect(p.botId)}><span class="s-dot wait" /><div class="grow"><b>${maskLabel(p.botId, p.title)}</b><span>${nameOf(p.botId)} · tap to answer</span></div><${I.chevron} /></button>`)}</div>` : null}
 
     ${rt.running.length ? html`<div class="section-title">Running now</div>
-      <div class="list">${rt.running.map((r) => html`<button class="row cc-row" onClick=${() => onSelect(r.threadId || r.botId)}><${Avatar} bot=${botById(r.botId)} size=${28} still /><div class="grow"><b>${nameOf(r.botId)} · ${r.label}</b><span>${r.step}</span></div><span class="status-time">${dur(now - r.startedAt)}</span></button>`)}</div>` : null}
+      <div class="list">${rt.running.map((r) => html`<button class="row cc-row" onClick=${() => onSelect(r.threadId || r.botId)}><${Avatar} bot=${botById(r.botId)} size=${28} still /><div class="grow"><b>${nameOf(r.botId)} · ${maskLabel(r.threadId, r.label)}</b><span>${isLocked(r.threadId) ? "Working" : r.step}</span></div><span class="status-time">${dur(now - r.startedAt)}</span></button>`)}</div>` : null}
 
     <div class="section-title">Today</div>
     <div class="list">${(today || []).map((t) => {
       const b = botById(t.botId);
       if (!b) return null;
-      return html`<button class="row cc-row" onClick=${() => onSelect(b.id)}><${Avatar} bot=${b} size=${28} still /><div class="grow"><b>${b.name}</b><span>${t.tasks ? `${t.tasks} task${t.tasks === 1 ? "" : "s"} · ${t.done} done${t.failed ? ` · ${t.failed} failed` : ""} · ${t.minutes || "<1"} min${t.recent[0] ? ` · ${t.recent[0].label}` : ""}` : "Nothing yet today"}</span></div><${I.chevron} /></button>`;
+      return html`<button class="row cc-row" onClick=${() => onSelect(b.id)}><${Avatar} bot=${b} size=${28} still /><div class="grow"><b>${b.name}</b><span>${t.tasks ? `${t.tasks} task${t.tasks === 1 ? "" : "s"} · ${t.done} done${t.failed ? ` · ${t.failed} failed` : ""} · ${t.minutes || "<1"} min${t.recent[0] && !isLocked(b.id) ? ` · ${t.recent[0].label}` : ""}` : "Nothing yet today"}</span></div><${I.chevron} /></button>`;
     })}</div>
 
     <div class="section-title">Routines</div>
@@ -2950,9 +3227,11 @@ function Shell() {
   const [panel, setPanel] = useState(() => (window.innerWidth > 1200 ? localStorage.getItem("panel") || null : null));
   const [control, setControl] = useState(false);
   const [sheet, setSheet] = useState(null);
-  const [lightbox, setLightbox] = useState(null); // an image url, or { list, i } for a gallery
+  const [viewer, setViewer] = useState(null); // { items, i, rect }: the photo and video viewer
+  const setLightbox = (url) => url && setViewer({ items: [urlItem(url)], i: 0 });
+  ui.openMedia = (items, i = 0, rect) => items.length && setViewer({ items, i, rect });
   const [palette, setPalette] = useState(false);
-  ui.openImage = (list, i = 0) => setLightbox({ list, i });
+  ui.openImage = (list, i = 0) => setViewer({ items: list.map(urlItem), i });
   ui.openPalette = () => setPalette(true);
   // ⌘K / Ctrl+K: jump anywhere.
   useEffect(() => {
@@ -3025,7 +3304,7 @@ function Shell() {
     ${sheet?.type === "newgroup" ? html`<${GroupSheet} st=${st} onClose=${() => setSheet(null)} onCreated=${(id) => loadState().then(() => { setSheet(null); select(id); })} />` : null}
     ${sheet?.type === "style" ? html`<${StyleSheet} bot=${bot} onClose=${() => setSheet(null)} />` : null}
     ${control ? html`<${RemoteView} onClose=${() => setControl(false)} />` : null}
-    ${lightbox ? html`<${Lightbox} box=${lightbox} onClose=${() => setLightbox(null)} />` : null}
+    ${viewer ? html`<${MediaViewer} items=${viewer.items} start=${viewer.i} rect=${viewer.rect} onClose=${() => setViewer(null)} />` : null}
     ${palette ? html`<${Palette} st=${st} bot=${bot} onClose=${() => setPalette(false)} onSelect=${select} onSheet=${setSheet} setControl=${setControl} />` : null}
     <${Toast} t=${s.toast} />
   </div>`;
@@ -3126,6 +3405,7 @@ function App() {
   if (authed === null) return html`<div class="boot"><${Blip} size=${48} state="working" /></div>`;
   if (!authed) return html`<${Login} onDone=${boot} /><${Toast} t=${s.toast} />`;
   if (!s.state) return html`<div class="boot"><${Blip} size=${48} state="working" /></div>`;
+  if (s.state.lock?.app && !appUnlocked) return html`<${LockScreen} full title="Blip is locked" sub="Enter your passcode." onUnlock=${() => { appUnlocked = true; emit(); }} /><${Toast} t=${s.toast} />`;
   return html`<${Shell} />`;
 }
 

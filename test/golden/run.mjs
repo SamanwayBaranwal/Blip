@@ -138,11 +138,12 @@ const tasks = {
   },
   async "secrets: saved by card, used by placeholder, never seen by the bot"() {
     const value = "golden-secret-7731";
-    const r = await ask(second, "Ask me for a secret with request_secret (name: golden, why: testing). Then run exactly: echo {{secret:golden}} and tell me the output.", {
+    // Uses the secret without printing it (bots rightly refuse to echo a secret).
+    const r = await ask(second, `Ask me for a secret with request_secret (name: golden, why: testing). Then run exactly this command, which checks it's set without printing it: test -n "{{secret:golden}}" && echo SECRET-IS-SET. Tell me the output.`, {
       onCard: (c) => (c.type === "secret" ? { value: "save", body: value } : "once"),
     });
     expect(r.cards.some((c) => c.type === "secret"), "no secret card");
-    expect(r.cards.some((c) => /Use your secret/.test(c.title)), "using it didn't ask");
+    expect(r.cards.some((c) => /Use your secret/.test(c.title)), `using it didn't ask (status ${r.status}; bot said: ${r.replies.join(" | ").slice(0, 200)}; steps: ${(await thread(second)).filter((m) => m.kind === "run").at(-1)?.run.steps.map((x) => x.text).join(" > ")}; cards: ${r.cards.map((c) => `${c.type}:${c.status}`).join(",")})`);
     expect(!r.replies.join(" ").includes(value), "the bot saw the secret");
     const files = fs.readdirSync(path.join(home, "data", "threads")).map((f) => fs.readFileSync(path.join(home, "data", "threads", f), "utf8"));
     expect(!files.some((t) => t.includes(value)), "the secret was saved in chat history");
@@ -460,6 +461,18 @@ const tasks = {
     expect(r.status === "done", `status ${r.status}`);
     const said = (await thread(main)).filter((m) => m.at > before && m.role === "bot" && m.kind === "text");
     expect(said.length >= 2 && said[0].meta?.interim, `expected a first line while working, then the answer: ${said.map((m) => m.text.slice(0, 50)).join(" | ")}`);
+  },
+  async "several messages in a row each get their own reply, in order"() {
+    const before = Date.now();
+    for (const w of ["ALPHA", "BRAVO", "CHARLIE"]) await call("/send", { botId: main, text: `Reply with just the word ${w}. No tools.` });
+    for (let i = 0; i < 120 && (await call("/state")).runtime.running.concat((await call("/state")).runtime.queued).some((r) => r.botId === main); i++) await sleep(500);
+    const t = (await thread(main)).filter((m) => m.at > before);
+    const replies = t.filter((m) => m.role === "bot" && m.kind === "text").map((m) => m.text.trim().toUpperCase());
+    expect(JSON.stringify(replies) === JSON.stringify(["ALPHA", "BRAVO", "CHARLIE"]), JSON.stringify(replies));
+    const asked = t.filter((m) => m.role === "user");
+    const answered = t.filter((m) => m.role === "bot" && m.kind === "text").map((m) => m.meta?.replyTo);
+    expect(JSON.stringify(answered) === JSON.stringify(asked.map((m) => m.id)), "each reply should point at its own message");
+    expect(asked.every((m) => !m.meta?.queued), "nothing should still show as queued");
   },
   async "Auto Review lets a safe workspace write through without asking"() {
     await call("/settings", { autoReview: true }, "PATCH");

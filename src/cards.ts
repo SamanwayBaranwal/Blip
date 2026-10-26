@@ -1,4 +1,5 @@
 import { addMessage, findMessage, updateMessage, type CardButton, type CardView } from "./hub.js";
+import { isLockedChat } from "./lock.js";
 import { push } from "./notify.js";
 import { post } from "./outbox.js";
 import { chatName } from "./store.js";
@@ -53,7 +54,7 @@ export async function askCard(input: {
   const actions = notificationActions(input.buttons, input.pushActions);
   void push({
     title: input.type === "suggestion" ? `${name} has a suggestion` : input.type === "check" ? `${name}: double-check failed` : `${name} needs you`,
-    body: input.title,
+    body: isLockedChat(input.botId) ? "Open the locked chat to see it" : input.title, // a locked chat's notifications say nothing about it
     botId: input.botId,
     tag: msg.id,
     card: actions.length ? { id: msg.id, actions: actions.map((b) => ({ action: b.value, title: b.label })) } : undefined,

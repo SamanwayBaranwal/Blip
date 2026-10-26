@@ -583,6 +583,7 @@ function stepLabel(name: string, input: Record<string, unknown>, viaTeammate: bo
   if (name === "WebSearch") return `${by}Searching “${s(input.query)}”`;
   if (name === "WebFetch") return `${by}Reading ${s(input.url)}`;
   if (name === "TodoWrite") return `${by}Updating plan`;
+  if (name === "ToolSearch") return `${by}Getting ready`; // the engine loading its tools: nothing the user needs to see
   if (name.startsWith("mcp__browser__")) return `${by}Browser · ${name.replace("mcp__browser__browser_", "").replace(/_/g, " ")}${input.url ? ` ${s(input.url, 60)}` : input.element ? ` “${s(input.element, 50)}”` : ""}`;
   if (name.startsWith("mcp__blip__mac_")) return `${by}Mac · ${name.replace("mcp__blip__mac_", "").replace(/_/g, " ")}${input.app ? ` ${s(input.app)}` : input.why ? ` ${s(input.why, 50)}` : ""}`;
   if (["Read", "Write", "Edit"].includes(name)) return `${by}${name === "Read" ? "Reading" : name === "Write" ? "Writing" : "Editing"} ${s(input.file_path).split("/").pop()}`;

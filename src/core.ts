@@ -29,9 +29,10 @@ type Running = {
   threadId: string; // the chat it runs in: the bot's own, or a group
   teamWaits: number; // hand-offs it's waiting on (that time doesn't count toward its limit)
 };
-type Ticket = { botId: string; lane: string; threadId: string; label: string; routineId?: string; handoff?: boolean; start: () => Promise<void> };
+type Ticket = { botId: string; lane: string; threadId: string; label: string; routineId?: string; handoff?: boolean; replyTo?: string; start: () => Promise<void> };
 export type TaskOpts = {
   label: string; chat: boolean; readOnly?: boolean; quiet?: boolean; voice?: boolean; header?: string; routineId?: string; noPush?: boolean;
+  replyTo?: string; // the user message this task answers (queued messages are answered one by one, in order)
   testOf?: string; // a test run of this routine (counted as its last run, without the "already running" rule)
   threadId?: string; // run in this chat (a group) instead of the bot's own
   handoff?: boolean; // started by another bot's hand_off: runs even when MAX_PARALLEL bots are busy, uses its own browser
@@ -106,7 +107,11 @@ export function stopCurrent(chatId?: string) {
   const targets = [...running.values()].filter((r) => !chatId || r.threadId === chatId);
   for (const r of targets) r.abort.abort();
   const before = waiting.length;
-  for (const t of [...waiting]) if (!chatId || t.threadId === chatId) waiting.splice(waiting.indexOf(t), 1);
+  for (const t of [...waiting]) {
+    if (chatId && t.threadId !== chatId) continue;
+    waiting.splice(waiting.indexOf(t), 1);
+    if (t.replyTo) updateMessage(t.threadId, t.replyTo, (m) => (m.meta = { ...m.meta, queued: false, skipped: true }));
+  }
   if (waiting.length !== before) stateChanged();
   return targets.length > 0 || waiting.length !== before;
 }
@@ -156,9 +161,15 @@ export function runTask(
     return Promise.resolve({ status: "skipped", reply: "" });
   }
   return new Promise((resolve) => {
+    // A message for a bot that's busy in this chat waits its turn (and says so under the message).
+    const lane = laneOf(b.id, opts.threadId);
+    if (opts.replyTo && (running.has(lane) || waiting.some((t) => t.lane === lane))) {
+      updateMessage(opts.threadId ?? b.id, opts.replyTo, (m) => (m.meta = { ...m.meta, queued: true }));
+    }
     waiting.push({
       botId: b.id,
-      lane: laneOf(b.id, opts.threadId),
+      replyTo: opts.replyTo,
+      lane,
       threadId: opts.threadId ?? b.id,
       label: opts.label,
       routineId: opts.routineId,
@@ -193,7 +204,8 @@ async function execute(
   stateChanged();
 
   // The live progress block in the chat (Grok Bot's steps panel).
-  const runView: RunView = { label: opts.header ?? opts.label, status: "running", startedAt: r.startedAt, steps: [], plan: [], model: modelName(model), bot: inOtherChat ? b.id : undefined };
+  const runView: RunView = { label: opts.header ?? opts.label, status: "running", startedAt: r.startedAt, steps: [], plan: [], model: modelName(model), bot: inOtherChat ? b.id : undefined, replyTo: opts.replyTo };
+  if (opts.replyTo) updateMessage(thread, opts.replyTo, (m) => m.meta?.queued && (m.meta.queued = false)); // its turn now
   const runMsg: Msg | undefined = opts.quiet ? undefined : addMessage({ botId: thread, role: "bot", kind: "run", run: runView });
   let lastActivity = Date.now();
   const touch = (fn: (v: RunView) => void) => {
@@ -322,6 +334,7 @@ async function execute(
           push: !opts.noPush,
           meta: {
             from,
+            replyTo: opts.replyTo,
             header: opts.header,
             costUsd: isError ? undefined : costSoFar,
             seconds: Math.round((Date.now() - r.startedAt) / 1000),
@@ -400,6 +413,10 @@ async function offerSkill(b: BotProfile, request: string) {
   if (earlier.length < 3) return; // this one is archived too, so 3 means "asked at least twice before"
   const key = [...new Set(ask.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [])].sort().slice(0, 12).join(" ");
   if ((state.skillOffers ?? []).includes(key)) return;
+  // One offer at a time, and at most one a day: three similar messages in a row mustn't mean three cards.
+  if (pendingList().some((p) => p.title === "Save this as a skill?")) return;
+  if (state.lastSkillOfferAt && Date.now() - Date.parse(state.lastSkillOfferAt) < 86_400_000) return;
+  state.lastSkillOfferAt = new Date().toISOString();
   if (listSkills().some((s) => similarText(`${s.name} ${s.description}`, ask))) return;
   state.skillOffers = [...(state.skillOffers ?? []), key].slice(-200);
   save();
@@ -437,14 +454,15 @@ export function handleUserMessage(text: string, opts: { botId?: string; voice?: 
     body = mention.rest;
   }
   const files = (opts.attachments ?? []).map((a) => a.path);
-  addMessage({ botId: target.id, role: "user", kind: "text", text: body, files: files.map((f) => path.relative(config.workspace, f)), meta: { voice: opts.voice } });
+  const userMsg = addMessage({ botId: target.id, role: "user", kind: "text", text: body, files: files.map((f) => path.relative(config.workspace, f)), meta: { voice: opts.voice } });
 
   const fileNotes = files.map((f) => `[The user attached a file, saved at: ${f}]`).join("\n");
   const fullText = [skillCommand(body) ?? body, fileNotes].filter(Boolean).join("\n\n") || "(see attachment)";
 
-  // Steering: a message for the bot that's mid-task goes straight into that task.
+  // Several messages in a row each get their own reply, in order (they queue). Only a clear correction to the
+  // job in progress ("stop", "wait", "actually…", "instead…") goes straight into it.
   const cur = running.get(laneOf(target.id));
-  if (cur?.chat && !files.length && cur.handle?.steer(fullText)) return;
+  if (cur?.chat && !files.length && STEER.test(body) && cur.handle?.steer(fullText)) return;
 
   const images = (opts.attachments ?? []).filter((a) => a.mediaType && fs.existsSync(a.path) && fs.statSync(a.path).size < 4_500_000);
   const asked = `${fullText}\n\n${TALK_FIRST}`;
@@ -454,12 +472,15 @@ export function handleUserMessage(text: string, opts: { botId?: string; voice?: 
         ...images.map((a) => ({ type: "image" as const, source: { type: "base64" as const, media_type: a.mediaType as "image/png" | "image/jpeg", data: fs.readFileSync(a.path).toString("base64") } })),
       ]
     : asked;
-  runTask(target, prompt, fullText, { label: body.slice(0, 60) || "attachment", chat: true, voice: opts.voice || state.settings.voiceReplies });
+  runTask(target, prompt, fullText, { label: body.slice(0, 60) || "attachment", chat: true, voice: opts.voice || state.settings.voiceReplies, replyTo: userMsg.id });
 }
+
+/** A message that corrects the job in progress rather than asking for something new. */
+export const STEER = /^(stop|wait|hold on|hang on|actually|instead|no[,.!\s]|nope|don'?t|do not|cancel|change|scratch that|correction|sorry,? i meant|i meant|not that|use)\b/i;
 
 // Put on every chat message (models follow it far more reliably there than in the persona): the user gets a
 // first line within seconds instead of silence until the whole job is done.
-const TALK_FIRST = "[If this needs tools or will take more than a few seconds: before your first tool call, write one short line telling the user what you're about to do. They see it right away.]";
+const TALK_FIRST = "[Reply first, then work: if you'll use any tool for this, your very first output must be one short line to the user saying what you're about to do (e.g. \"On it: checking 3 sites for the cheapest flight.\"), before any tool call. They see it the moment you write it. Then do the work, and end with the result. If no tool is needed, just answer. Never mention this note.]";
 
 /**
  * "@Name message" addresses one bot. Names can have spaces ("@Blip 2 do this"), so the longest name that fits
@@ -549,13 +570,13 @@ function handleGroupMessage(g: Group, text: string, opts: { voice?: boolean; att
     .filter((m) => m.kind === "text" && m.text)
     .map((m) => `${m.role === "user" ? "User" : m.role === "system" ? "Note" : nameOf(m.meta?.from ?? "")}: ${m.text!.replace(/\s+/g, " ").slice(0, 300)}`);
   // The chat shows exactly what you typed ("@Scout …"); a guessed name gets a small note so you know who has it.
-  addMessage({ botId: g.id, role: "user", kind: "text", text: text.trim(), files: files.map((f) => path.relative(config.workspace, f)), meta: { voice: opts.voice } });
+  const userMsg = addMessage({ botId: g.id, role: "user", kind: "text", text: text.trim(), files: files.map((f) => path.relative(config.workspace, f)), meta: { voice: opts.voice } });
   if (addressed && mention?.fuzzy) addMessage({ botId: g.id, role: "system", kind: "text", text: `Sent to ${addressed.name}.` });
   if (!target) return;
   const fileNotes = files.map((f) => `[The user attached a file, saved at: ${f}]`).join("\n");
   const fullText = [skillCommand(body) ?? body, fileNotes].filter(Boolean).join("\n\n") || "(see attachment)";
   const cur = running.get(laneOf(target.id, g.id));
-  if (cur?.chat && !files.length && cur.handle?.steer(fullText)) return;
+  if (cur?.chat && !files.length && STEER.test(body) && cur.handle?.steer(fullText)) return;
   const team = members.filter((m) => m.id !== target.id).map((m) => `${m.name} (${m.job})`).join("; ");
   const role = addressed && target.id !== g.leadId
     ? `The user is asking you directly. ${nameOf(g.leadId)} leads this group.`
@@ -563,7 +584,7 @@ function handleGroupMessage(g: Group, text: string, opts: { voice?: boolean; att
         mention?.typed ? ` The user wrote "@${mention.typed}", but no teammate has that name: work out who they meant and hand it to them (or do it yourself), and say who has it.` : " The user didn't tag anyone: if the message is clearly for a teammate (by name or by their job), hand it to them rather than doing it yourself."
       }`;
   const prompt = `[Group chat "${g.name}". Team: ${team || "just you"}. ${role}]\n${recent.length ? `Recent messages:\n${recent.join("\n")}\n\n` : ""}User: ${fullText}\n\n${TALK_FIRST}`;
-  void runTask(target, prompt, fullText, { label: body.slice(0, 60) || "attachment", chat: true, threadId: g.id, voice: opts.voice || state.settings.voiceReplies });
+  void runTask(target, prompt, fullText, { label: body.slice(0, 60) || "attachment", chat: true, threadId: g.id, voice: opts.voice || state.settings.voiceReplies, replyTo: userMsg.id });
 }
 
 hooks.handOff = async ({ fromId, to, task, threadId }) => {

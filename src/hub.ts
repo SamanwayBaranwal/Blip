@@ -24,6 +24,7 @@ export type RunView = {
   replay?: string; // a clip of what the bot did in the browser (path in the workspace)
   bot?: string; // in a group chat: which bot this task belongs to
   shots?: string[]; // screenshots of what it did (workspace paths): proof of work, shown as a small gallery
+  replyTo?: string; // the user message this task answers (shown as a quote when it isn't right above)
   results?: RunResult[]; // what it made: files, events, reminders, skills, routines (shown as chips on the task)
 };
 
@@ -50,7 +51,11 @@ export type Msg = {
   kind: "text" | "run" | "card";
   text?: string;
   files?: string[]; // paths relative to the workspace
-  meta?: { costUsd?: number; seconds?: number; voice?: boolean; header?: string; feedback?: "up" | "down"; error?: boolean; from?: string; interim?: boolean }; // from: the bot speaking in a group; interim: said while still working
+  meta?: { costUsd?: number; seconds?: number; voice?: boolean; header?: string; feedback?: "up" | "down"; error?: boolean; from?: string; interim?: boolean;
+    queued?: boolean; // a message waiting its turn (each one gets its own reply, in order)
+    skipped?: boolean; // it was still queued when the chat was stopped
+    replyTo?: string; // the user message this reply answers
+  }; // from: the bot speaking in a group; interim: said while still working
   run?: RunView;
   card?: CardView;
 };

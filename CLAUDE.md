@@ -380,6 +380,44 @@ The goal of this batch was that you never have to guess what Blip is doing.
 - **Crew logo:** a group avatar is a rounded square with up to 3 member Blips in their colors, the lead in front, plus "+N" for more. Members working in the group bob one after another. The empty group chat shows it large.
 - **Tests:** 61 unit tests and 29 golden tasks.
 
+## Reply first, chat lock, launch prep (2026-10-26)
+
+- **Reply first:** `TALK_FIRST` (core.ts) now says the very first output must be one line saying what the bot is about to do, before any tool call, whenever it'll use a tool.
+- **Chat lock (`lock.ts`):**
+  - **Passcode:** 4 to 8 digits, stored as a salted scrypt hash in `state.lock` (with `digits`, so the keypad auto-submits). After 5 wrong tries, waits grow from 30 s.
+  - **Locked chats:** `lock.chats` and `lock.app`. Locking a chat is free; unlocking it for good, turning off the app lock or removing the passcode needs the passcode.
+  - **Endpoints:** `/api/lock` and `/lock/pin|check|chat|app|remove`.
+  - **App:**
+    - `LockScreen` (sleeping Blip, dots, keypad, shake on a wrong code)
+    - `unlocked` / `appUnlocked`, in memory only, re-locked after 60 s hidden
+    - `LockToggle` in bot and group settings, and `PrivacySection` in Settings
+    - Face ID / Touch ID through a local WebAuthn passkey (`localStorage["blip-bio"]`), which only opens the lock on that device
+  - **No leaks:** locked chats are masked everywhere outside them: push bodies (`outbox.post`, `askCard`), Mac notifications, toasts, the strip, the control center and the sidebar ("Locked").
+- **README:** "Why I built it" (the user's 10-day story) and "Get your own AI agent in 5 steps": Chrome + Homebrew + `xcode-select`, the install line, Claude, Screen Recording + Accessibility for node, then Set up. `blip.sh setup` warns if Chrome is missing.
+- **Launch checks (done):** no secrets, tokens or data files anywhere in git history.
+- **Still open for launch:**
+  - The GitHub repo is `SamanwayBaranwal/pilot`, but `install.sh` and the README point at `.../blip`: rename the repo (or change both).
+  - There's no LICENSE.
+  - This file has personal notes about the user (decide before making it public).
+- **Tests:** 65 unit tests and 29 golden tasks.
+
+## Message queue and media viewer (2026-10-26, later)
+
+- **Queue:**
+  - Messages sent while a bot is busy in that chat no longer steer the task. Each becomes its own task, run in order in the same lane (`TaskOpts.replyTo`).
+  - The user message gets `meta.queued` while it waits, cleared when its turn starts. A stopped chat marks it `meta.skipped`.
+  - Run blocks and replies carry `replyTo`, and the app quotes the message ("Replying to …") when the answer isn't right under it.
+  - Only a clear correction steers the running job (`STEER`: stop, wait, actually, instead, no, cancel, change, I meant…).
+  - Golden test: three messages in a row get three replies, in order, each pointing at its own message.
+- **Skill offers:** at most one pending and one a day (`state.lastSkillOfferAt`). Three similar messages had made three cards.
+- **Media viewer** (`MediaViewer` replaces `Lightbox`):
+  - The full-screen viewer for photos and videos, with every photo and video in the chat in one swipeable set.
+  - Gestures: the FLIP open animation from the tapped tile, swipe left and right, swipe down to close, pinch, double-tap zoom, and a single tap to hide the controls.
+  - Videos play in place. Share (`navigator.share`) and Save at the top, thumbnails along the bottom.
+  - In the chat, `Files` shows a media grid (1–4 tiles plus "+N", videos with a play badge). Proof shots, result chips and the Files panel open the same viewer (`ui.openMedia(items, i, rect)`).
+  - `niceName()` drops the inbox time prefix from file names.
+- **Polish:** the `TALK_FIRST` note ends with "Never mention this note". The engine's `ToolSearch` step shows as "Getting ready".
+
 ## How the code fits together
 
 - `hub.ts` is the single source of truth for conversations. Message kinds are `text`, `run` (live progress) and `card`.

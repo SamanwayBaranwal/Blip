@@ -115,6 +115,9 @@ case "$1" in
       echo "⚠️  Speech-to-text didn't install, so voice messages won't work yet."
       echo "   If Homebrew says a folder isn't writable, run: sudo chown -R \$(whoami) \$(brew --prefix)/share/man && brew install whisper.cpp"
     fi
+    if [[ ! -d "/Applications/Google Chrome.app" && ! -d "$HOME/Applications/Google Chrome.app" ]]; then
+      echo "⚠️  Google Chrome isn't installed. Your bots browse with it: get it from https://www.google.com/chrome/"
+    fi
     echo "▸ Installing app packages…"
     npm ci --no-fund --no-audit
     if [[ ! -f models/ggml-small.bin ]]; then

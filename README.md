@@ -6,25 +6,46 @@ Meet **Blip**: a mouse pointer that came alive and does things on your computer 
 
 Every bot has the Mac as its computer: a terminal, files, a real Chrome browser, and control of Mac apps. You talk to your bots in the Blip app (installed on your phone's Home Screen) or, optionally, Telegram. Risky actions come to you as approval cards first.
 
-## Quick start
+## Why I built it
 
-On the Mac that will run Blip (it should stay on and logged in):
+For the last 10 days I've run my work through Blip from my phone, testing it as hard as I could. I didn't open my laptop once. One prompt at a time, it built a ClickUp-style project platform for my company and set up many of my day-to-day automations, while the Mac sat at home doing the work.
+
+That's the idea: an AI agent with its own computer that you message like a person, from anywhere.
+
+## Get your own AI agent in 5 steps
+
+You need a Mac that can stay on (an old MacBook is perfect) and a phone.
+
+**1. Prepare the Mac.** Plug it in, sign in to it, and install:
+- **[Google Chrome](https://www.google.com/chrome/).** Your bots browse with it. No extension needed: Blip drives Chrome itself, through Playwright.
+- **[Homebrew](https://brew.sh)**, the one line on its home page.
+- **Apple's developer tools:** in Terminal, run `xcode-select --install` and click Install.
+
+**2. Install Blip.** In Terminal, paste:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SamanwayBaranwal/blip/main/install.sh | zsh
 ```
 
-It installs Blip in `~/Blip` and starts it. Then:
+It installs everything else on its own (Node.js, ffmpeg, speech-to-text, and the **Cloudflare tunnel** that lets your phone reach the Mac from anywhere in the world) and starts Blip in `~/Blip`.
 
-1. **Sign in to Claude Code once** on that Mac (Blip uses your Claude plan).
-2. **Open Blip on the Mac.** At the top it says *Put Blip on your phone, from anywhere*. Tap **Set up**:
-   - **Turn on your link.** Tap *Quick link*. Nothing to sign up for.
-   - **Your email.** Type the email you read on your phone.
-   - **Blip's email.** Give Blip a mailbox to send from: make a new Gmail for it, turn on 2-step verification, [create an app password](https://myaccount.google.com/apppasswords), and paste both.
-   - **Email me the link.** Blip emails you the link and a one-tap sign-in link. Open it on your phone, tap the link, then *Share → Add to Home Screen*. Or scan the QR code on the Mac's screen with your phone's camera.
-3. In the app, open **Settings → This Mac → Check Mac access** to allow Calendar, Reminders, Contacts and Mail.
+**3. Connect Claude.** Install [Claude Code](https://claude.com/claude-code) and sign in once: Blip runs on your Claude plan. Or paste an Anthropic API key in the app instead.
 
-That's it: your phone now reaches Blip from any network, even from another country. Running the install line again updates Blip.
+**4. Allow the Mac permissions.** Open **System Settings → Privacy & Security** and turn on **node** under:
+- **Screen & System Audio Recording**, so you can see the Mac's screen from your phone (like Chrome Remote Desktop) and bots can see what they're doing.
+- **Accessibility**, so you and your bots can click and type.
+
+Then run `~/Blip/blip.sh restart`. In the Blip app, open **Settings → This Mac → Check Mac access** and click Allow on the Mac for Calendar, Reminders, Contacts and Mail.
+
+**5. Put it on your phone, from anywhere.** Open Blip on the Mac and tap **Set up** in the bar at the top:
+- **Turn on your link.** Tap *Quick link*. No account, it works from any network or country.
+- **Your email.** Where Blip sends your link.
+- **Blip's own email.** Make a new Gmail just for Blip, turn on 2-step verification, [create an app password](https://myaccount.google.com/apppasswords), and paste both. Blip sends from it, and people can email your bot.
+- **Email me the link.** Open the email on your phone and tap the link: you're signed in. Then *Share → Add to Home Screen*. Or scan the QR code on the Mac's screen.
+
+Done. Your personal AI agent is in your pocket, and it does the work on your Mac while you're anywhere.
+
+Running the install line again updates Blip. Keep the Mac awake on the charger with `sudo pmset -c sleep 0 disksleep 0 womp 1 autorestart 1 displaysleep 10` and keep the lid open.
 
 Want to add a skill, a tool or a connector? See [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -57,6 +78,8 @@ Want to add a skill, a tool or a connector? See [CONTRIBUTING.md](CONTRIBUTING.m
 - **Talk mode**: a hands-free conversation (it listens, answers out loud and listens again), or hold the mic to send a voice message. Speech is turned into text on the Mac itself.
 - **Double-checks its work**: after a task that changes files, your calendar, reminders, routines or skills, an independent checker confirms it really happened.
 - **Skills you can share**: export or import any skill as one `.md` file, every edit keeps the old version, and a library of examples comes with Blip. When you ask for the same thing three times, Blip offers to save it as a skill.
+- **Replies first, then works**: on any job it tells you right away what it's about to do, then does it, and answers your messages mid-task while it keeps going. One bot can work in a group and in its own chat at the same time.
+- **Chat lock**: lock any chat (or the whole app) behind a passcode or Face ID, like WhatsApp. Locked chats show no previews and their notifications don't show the text.
 - **Always clear what's happening**:
   - A status line under the input says what the bot is doing: listening, thinking, the current step, running a routine, waiting for you, speaking.
   - A strip at the top shows every running task, anything waiting for you, the next routine and the last check-in.
