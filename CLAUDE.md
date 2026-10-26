@@ -418,6 +418,16 @@ The goal of this batch was that you never have to guess what Blip is doing.
   - `niceName()` drops the inbox time prefix from file names.
 - **Polish:** the `TALK_FIRST` note ends with "Never mention this note". The engine's `ToolSearch` step shows as "Getting ready".
 
+## Website (2026-10-26, night)
+
+- **`site/`:** the public homepage. It's static: `index.html` plus `assets/`, with no build step, and `site/README.md` explains deploying it (Vercel or Cloudflare Pages, root `site`).
+  - **Style:** light (the user asked for "not that dark"): warm off-white `#faf9f6`, near-black ink, Geist, black pill buttons, and soft pastel tiles taken from the bot colors. No gradients and no emoji. The Blip mascot is an inline SVG `<use href="#blip">` that bobs and blinks.
+  - **Sections:** hero (two phone shots), how it works (desktop window), a features bento, the founder's 10-day story, 5 install steps with copy buttons, safety and FAQ.
+- **Screenshots** are real app screens in light theme with seeded demo data: a scratch server, curated thread JSON, and proof images rendered from small demo pages.
+  - Pending cards expire on restart, so the shooting script patches `/api/thread` responses in the browser to show a draft as pending.
+  - Phone shots are 390×844 @3x and are resized to 780 px JPEG.
+- **Golden secrets test:** it now uses the secret without printing it (`test -n … && echo SECRET-IS-SET`). Bots rightly refuse to echo a secret, which made the old test flaky.
+
 ## How the code fits together
 
 - `hub.ts` is the single source of truth for conversations. Message kinds are `text`, `run` (live progress) and `card`.

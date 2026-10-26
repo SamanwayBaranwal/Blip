@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Blip: an AI agent with its own computer</title>
+<meta name="description" content="Blip lives on your Mac and does real work: it browses, builds, emails and schedules. Message it from your phone, from anywhere. Open source." />
+<meta property="og:title" content="Blip: an AI agent with its own computer" />
+<meta property="og:description" content="Your own always-on AI agent. It runs on your Mac and you message it from your phone, from anywhere. Open source." />
+<meta property="og:image" content="assets/desktop.jpg" />
+<meta name="theme-color" content="#faf9f6" />
+<link rel="icon" href="assets/icon.svg" type="image/svg+xml" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #faf9f6;
+    --paper: #ffffff;
+    --soft: #f3f1ec;
+    --ink: #141413;
+    --ink-2: #4a4945;
+    --ink-3: #87857f;
+    --line: #e7e4dd;
+    --sky: #dcecff;
+    --mint: #d9f5e9;
+    --gold: #fbefc8;
+    --pink: #ffe1ea;
+    --peach: #ffe6d4;
+    --lilac: #ebe5ff;
+    --radius: 22px;
+    --shadow: 0 1px 2px rgba(20, 20, 19, 0.04), 0 18px 50px -18px rgba(20, 20, 19, 0.18);
+    --font: "Geist", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  html, body { overflow-x: clip; } /* nothing may push the page wider than the screen */
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.6 var(--font); -webkit-font-smoothing: antialiased; }
+  a { color: inherit; text-decoration: none; }
+  img { display: block; max-width: 100%; }
+  .wrap { width: min(1160px, 100% - 40px); margin: 0 auto; }
+
+  /* Nav */
+  nav { position: sticky; top: 0; z-index: 10; background: color-mix(in srgb, var(--bg) 85%, transparent); backdrop-filter: saturate(1.4) blur(14px); -webkit-backdrop-filter: saturate(1.4) blur(14px); border-bottom: 1px solid transparent; transition: border-color 0.2s; }
+  nav.scrolled { border-bottom-color: var(--line); }
+  nav .wrap { display: flex; align-items: center; gap: 28px; height: 66px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 19px; letter-spacing: -0.02em; }
+  .brand svg { width: 28px; height: 28px; }
+  .links { display: flex; gap: 24px; font-size: 14.5px; color: var(--ink-2); }
+  .links a:hover { color: var(--ink); }
+  .spacer { flex: 1; }
+  .btn { display: inline-flex; align-items: center; gap: 8px; height: 44px; padding: 0 20px; border-radius: 999px; font-weight: 500; font-size: 15px; border: 1px solid var(--ink); background: var(--ink); color: #fff; transition: transform 0.15s, background 0.15s, box-shadow 0.2s; white-space: nowrap; }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 8px 24px -10px rgba(20, 20, 19, 0.5); }
+  .btn.ghost { background: transparent; color: var(--ink); border-color: var(--line); }
+  .btn.ghost:hover { background: var(--paper); box-shadow: none; }
+  .btn.small { height: 38px; padding: 0 16px; font-size: 14px; }
+  .btn svg { width: 17px; height: 17px; }
+
+  /* Hero */
+  .hero { padding: 72px 0 40px; display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr); gap: 40px; align-items: center; }
+  .hero > *, .grid > *, .story > *, .istep > * { min-width: 0; }
+  .pill { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px 6px 8px; border-radius: 999px; background: var(--paper); border: 1px solid var(--line); font-size: 13.5px; color: var(--ink-2); }
+  .pill i { width: 22px; height: 22px; border-radius: 50%; background: var(--mint); display: grid; place-items: center; font-style: normal; }
+  .pill i::after { content: ""; width: 7px; height: 7px; border-radius: 50%; background: #1f9d63; }
+  h1 { font-size: clamp(40px, 6.4vw, 78px); overflow-wrap: break-word; line-height: 1.02; letter-spacing: -0.045em; font-weight: 600; margin: 22px 0 20px; }
+  h1 .soft { color: var(--ink-3); }
+  .lede { font-size: clamp(17px, 1.6vw, 20px); color: var(--ink-2); max-width: 540px; margin: 0 0 30px; }
+  .ctas { display: flex; gap: 12px; flex-wrap: wrap; }
+  .install { margin-top: 26px; display: flex; align-items: center; gap: 10px; background: var(--paper); border: 1px solid var(--line); border-radius: 14px; padding: 6px 6px 6px 16px; max-width: 560px; font: 13.5px var(--mono); color: var(--ink-2); }
+  .install code { flex: 1; overflow-x: auto; white-space: nowrap; scrollbar-width: none; }
+  .install code::-webkit-scrollbar { display: none; }
+  .install code b { color: var(--ink-3); font-weight: 400; }
+  .copy { height: 34px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--soft); font: 500 13px var(--font); color: var(--ink); cursor: pointer; flex: none; }
+  .copy:hover { background: var(--line); }
+
+  .stage { position: relative; height: 640px; }
+  .phone { position: absolute; width: 290px; border-radius: 46px; padding: 10px; background: #141413; box-shadow: 0 50px 90px -30px rgba(20, 20, 19, 0.45), 0 0 0 1px rgba(0, 0, 0, 0.06); }
+  .phone img { border-radius: 37px; width: 100%; }
+  .phone.a { right: 175px; top: 10px; transform: rotate(-4deg); z-index: 2; animation: float 7s ease-in-out infinite; }
+  .phone.b { right: 0; top: 70px; transform: rotate(5deg); animation: float 7s ease-in-out -3.5s infinite; }
+  @keyframes float { 50% { translate: 0 -10px; } }
+  .tile { position: absolute; border-radius: 28px; z-index: 0; }
+  .t1 { width: 260px; height: 260px; background: var(--sky); left: 10px; top: 60px; }
+  .t2 { width: 200px; height: 200px; background: var(--gold); right: -20px; bottom: 10px; border-radius: 50%; }
+  .t3 { width: 120px; height: 120px; background: var(--pink); left: 120px; bottom: 30px; border-radius: 34px; }
+  .mascot { position: absolute; z-index: 3; width: 110px; left: 30px; bottom: 120px; animation: bob 3.2s ease-in-out infinite; filter: drop-shadow(0 14px 18px rgba(20, 20, 19, 0.2)); }
+  @keyframes bob { 50% { transform: translateY(-10px) rotate(-3deg); } }
+  .mascot .eyes { animation: blink 4.6s infinite; transform-origin: 97px 98px; }
+  @keyframes blink { 0%, 94%, 100% { transform: scaleY(1); } 96% { transform: scaleY(0.1); } }
+
+  /* Works with */
+  .works { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px 34px; padding: 34px 0 10px; color: var(--ink-3); font-size: 14.5px; }
+  .works b { color: var(--ink-2); font-weight: 500; }
+
+  /* Sections */
+  section { padding: 96px 0 0; }
+  .eyebrow { font: 500 13px var(--mono); color: var(--ink-3); letter-spacing: 0.04em; text-transform: uppercase; }
+  h2 { font-size: clamp(34px, 4.4vw, 54px); line-height: 1.06; letter-spacing: -0.04em; font-weight: 600; margin: 14px 0 16px; max-width: 820px; }
+  .sub { font-size: 18px; color: var(--ink-2); max-width: 640px; margin: 0; }
+  .center { text-align: center; }
+  .center h2, .center .sub { margin-left: auto; margin-right: auto; }
+
+  .window { margin-top: 44px; border-radius: 20px; background: var(--paper); border: 1px solid var(--line); box-shadow: var(--shadow); overflow: hidden; }
+  .window .bar { height: 40px; display: flex; align-items: center; gap: 7px; padding: 0 16px; border-bottom: 1px solid var(--line); background: var(--soft); }
+  .window .bar i { width: 11px; height: 11px; border-radius: 50%; background: #dcd9d2; }
+  .window .bar span { margin: 0 auto; font: 12.5px var(--mono); color: var(--ink-3); transform: translateX(-20px); }
+
+  .steps3 { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 40px; }
+  .step { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); padding: 26px; }
+  .step .n { width: 34px; height: 34px; border-radius: 50%; display: grid; place-items: center; font: 600 14px var(--mono); margin-bottom: 18px; }
+  .step h3 { font-size: 20px; letter-spacing: -0.02em; margin: 0 0 8px; font-weight: 600; }
+  .step p { margin: 0; color: var(--ink-2); font-size: 15.5px; }
+
+  /* Feature grid */
+  .grid { display: grid; grid-template-columns: repeat(12, 1fr); gap: 18px; margin-top: 44px; }
+  .card { background: var(--paper); border: 1px solid var(--line); border-radius: var(--radius); padding: 28px; overflow: hidden; position: relative; transition: transform 0.25s, box-shadow 0.25s; }
+  .card:hover { transform: translateY(-3px); box-shadow: var(--shadow); }
+  .card h3 { font-size: 21px; letter-spacing: -0.02em; margin: 0 0 8px; font-weight: 600; }
+  .card p { margin: 0; color: var(--ink-2); font-size: 15.5px; }
+  .card .ico { width: 44px; height: 44px; border-radius: 14px; display: grid; place-items: center; margin-bottom: 18px; }
+  .card .ico svg { width: 22px; height: 22px; stroke: var(--ink); fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  .span-7 { grid-column: span 7; } .span-5 { grid-column: span 5; } .span-4 { grid-column: span 4; } .span-6 { grid-column: span 6; }
+  .card.shot { padding-bottom: 0; display: flex; flex-direction: column; }
+  .card.shot .crop { margin: 24px -1px 0; flex: 1; min-height: 300px; position: relative; border-radius: 18px 18px 0 0; overflow: hidden; }
+  .card.shot .crop img { position: absolute; left: 50%; transform: translateX(-50%); width: 330px; top: 0; border-radius: 30px 30px 0 0; border: 8px solid #141413; border-bottom: 0; }
+  .bg-sky { background: var(--sky); } .bg-mint { background: var(--mint); } .bg-gold { background: var(--gold); } .bg-pink { background: var(--pink); } .bg-lilac { background: var(--lilac); } .bg-peach { background: var(--peach); }
+  .crop.bg-sky, .crop.bg-mint, .crop.bg-gold, .crop.bg-pink, .crop.bg-lilac, .crop.bg-peach { padding-top: 26px; }
+  .crop.pad img { top: 26px; }
+
+  /* Story */
+  .story { margin-top: 96px; background: var(--ink); color: #fff; border-radius: 32px; padding: 72px clamp(28px, 6vw, 88px); display: grid; grid-template-columns: 1.3fr 1fr; gap: 50px; align-items: center; }
+  .story blockquote { margin: 0; font-size: clamp(28px, 3.4vw, 44px); line-height: 1.12; letter-spacing: -0.035em; font-weight: 600; }
+  .story p { color: rgba(255, 255, 255, 0.72); font-size: 17px; margin: 22px 0 0; }
+  .story .who { display: flex; align-items: center; gap: 12px; margin-top: 30px; font-size: 15px; }
+  .story .who i { width: 40px; height: 40px; border-radius: 50%; background: #fff; display: grid; place-items: center; }
+  .story .who i svg { width: 26px; height: 26px; }
+  .story .who span { color: rgba(255, 255, 255, 0.6); }
+  .stats { display: grid; gap: 14px; }
+  .stat { border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 18px; padding: 20px 22px; }
+  .stat b { display: block; font-size: 36px; letter-spacing: -0.03em; font-weight: 600; line-height: 1.1; }
+  .stat span { color: rgba(255, 255, 255, 0.62); font-size: 14.5px; }
+
+  /* Install */
+  .install-steps { display: grid; gap: 12px; margin-top: 40px; counter-reset: s; }
+  .istep { display: grid; grid-template-columns: 56px 1fr; gap: 20px; background: var(--paper); border: 1px solid var(--line); border-radius: 20px; padding: 24px 26px; }
+  .istep .n { width: 44px; height: 44px; border-radius: 14px; display: grid; place-items: center; font: 600 17px var(--mono); }
+  .istep h3 { margin: 0 0 6px; font-size: 19px; font-weight: 600; letter-spacing: -0.02em; }
+  .istep p, .istep li { color: var(--ink-2); font-size: 15.5px; margin: 0; }
+  .istep ul { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 4px; }
+  .istep .install { margin-top: 12px; max-width: none; }
+  .istep a { text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--line); }
+
+  /* Safety */
+  .safety { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 44px; }
+  .safety .card { padding: 24px; }
+  .safety h3 { font-size: 18px; }
+
+  /* FAQ */
+  .faq { margin-top: 40px; display: grid; gap: 10px; max-width: 820px; }
+  details { background: var(--paper); border: 1px solid var(--line); border-radius: 18px; padding: 0 24px; }
+  summary { list-style: none; cursor: pointer; padding: 20px 0; font-weight: 500; font-size: 17px; display: flex; justify-content: space-between; gap: 16px; }
+  summary::-webkit-details-marker { display: none; }
+  summary::after { content: "+"; font: 400 22px var(--mono); color: var(--ink-3); transition: transform 0.2s; line-height: 1; }
+  details[open] summary::after { transform: rotate(45deg); }
+  details p { margin: 0 0 20px; color: var(--ink-2); }
+
+  /* Final CTA + footer */
+  .final { margin: 110px 0 0; text-align: center; padding: 80px 20px; border-radius: 32px; background: var(--paper); border: 1px solid var(--line); position: relative; overflow: hidden; }
+  .final .mascot-big { width: 96px; margin: 0 auto 10px; animation: bob 3.2s ease-in-out infinite; }
+  .final h2 { margin: 10px auto 14px; }
+  .final .ctas { justify-content: center; margin-top: 28px; }
+  footer { padding: 44px 0 50px; color: var(--ink-3); font-size: 14px; }
+  footer .wrap { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+  footer a:hover { color: var(--ink); }
+
+  .reveal { opacity: 0; transform: translateY(18px); transition: opacity 0.7s ease, transform 0.7s cubic-bezier(0.2, 0.8, 0.2, 1); }
+  .reveal.in { opacity: 1; transform: none; }
+
+  @media (max-width: 980px) {
+    .hero { grid-template-columns: minmax(0, 1fr); padding-top: 44px; }
+    .stage { height: 560px; max-width: 520px; margin: 0 auto; width: 100%; }
+    .story { grid-template-columns: 1fr; }
+    .span-7, .span-5, .span-4, .span-6 { grid-column: span 12; }
+    .steps3, .safety { grid-template-columns: 1fr; }
+    .links { display: none; }
+  }
+  @media (max-width: 560px) {
+    .wrap { width: calc(100% - 32px); }
+    .stage { height: 470px; }
+    .phone { width: 220px; border-radius: 36px; padding: 7px; }
+    .phone img { border-radius: 30px; }
+    .phone.a { right: 120px; } .phone.b { right: -6px; top: 60px; }
+    .mascot { width: 80px; left: 0; bottom: 70px; }
+    .t1 { width: 180px; height: 180px; }
+    nav .btn.ghost { display: none; }
+    .istep { grid-template-columns: 1fr; gap: 12px; }
+    .card.shot .crop img { width: 280px; }
+  }
+  @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } .reveal { opacity: 1; transform: none; } }
+</style>
+</head>
+<body>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <g id="blip">
+      <path d="M62 34 L62 158 L94 128 L114 172 L136 162 L116 120 L158 120 Z" fill="#141413" stroke="#141413" stroke-width="18" stroke-linejoin="round" />
+      <g class="eyes"><ellipse cx="84.5" cy="98" rx="5.6" ry="7.4" fill="#fff" /><ellipse cx="109.5" cy="98" rx="5.6" ry="7.4" fill="#fff" /></g>
+      <ellipse cx="73.9" cy="109.4" rx="6.5" ry="4" fill="#ff8aa0" opacity="0.6" /><ellipse cx="120.1" cy="109.4" rx="6.5" ry="4" fill="#ff8aa0" opacity="0.6" />
+      <path d="M92 112 Q97 117 102 112" stroke="#fff" stroke-width="4" fill="none" stroke-linecap="round" />
+    </g>
+  </defs>
+</svg>
+
+<nav id="nav">
+  <div class="wrap">
+    <a class="brand" href="#"><svg viewBox="40 20 140 170"><use href="#blip" /></svg>Blip</a>
+    <div class="links"><a href="#how">How it works</a><a href="#features">Features</a><a href="#safety">Safety</a><a href="#faq">FAQ</a></div>
+    <span class="spacer"></span>
+    <a class="btn ghost small" href="https://github.com/SamanwayBaranwal/blip"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 .5a11.5 11.5 0 0 0-3.6 22.4c.6.1.8-.3.8-.6v-2c-3.2.7-3.9-1.5-3.9-1.5-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.8 1.3 3.5 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.5-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0C17 4.9 18 5.2 18 5.2c.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.3c0 .3.2.7.8.6A11.5 11.5 0 0 0 12 .5Z"/></svg>GitHub</a>
+    <a class="btn small" href="#install">Get Blip</a>
+  </div>
+</nav>
+
+<main class="wrap">
+  <header class="hero">
+    <div>
+      <span class="pill"><i></i>Open source · runs on your own Mac</span>
+      <h1>An AI agent<br />with its own <span class="soft">computer.</span></h1>
+      <p class="lede">Blip lives on your Mac and does the real work: it browses, builds, emails, schedules and checks its own results. You just message it from your phone, from anywhere in the world.</p>
+      <div class="ctas">
+        <a class="btn" href="#install">Get Blip, it's free</a>
+        <a class="btn ghost" href="#how">See how it works</a>
+      </div>
+      <div class="install"><code><b>$</b> curl -fsSL https://raw.githubusercontent.com/SamanwayBaranwal/blip/main/install.sh | zsh</code><button class="copy" data-copy="curl -fsSL https://raw.githubusercontent.com/SamanwayBaranwal/blip/main/install.sh | zsh">Copy</button></div>
+    </div>
+    <div class="stage" aria-hidden="true">
+      <div class="tile t1"></div><div class="tile t2"></div><div class="tile t3"></div>
+      <div class="phone a"><img src="assets/chat-board.jpg" alt="Blip building a task board: it says what it's doing, works, shows screenshots and the files it made" /></div>
+      <div class="phone b"><img src="assets/group.jpg" alt="A group chat where three bots split a job" /></div>
+      <svg class="mascot" viewBox="40 20 140 170"><use href="#blip" /></svg>
+    </div>
+  </header>
+
+  <div class="works"><span>Works with</span><b>Claude</b><b>Google Chrome</b><b>Your Mac's apps</b><b>iPhone &amp; Android</b><b>Gmail</b><b>Telegram</b></div>
+
+  <section id="how" class="reveal">
+    <div class="center">
+      <div class="eyebrow">How it works</div>
+      <h2>Message it like a person. Watch it work like one.</h2>
+      <p class="sub">Every bot gets a real computer: a terminal, files, a real Chrome browser and your Mac's apps. It tells you what it's about to do, does it, and shows you proof.</p>
+    </div>
+    <div class="window"><div class="bar"><i></i><i></i><i></i><span>Blip</span></div><img src="assets/desktop.jpg" alt="Blip on the desktop: bots in the sidebar, a finished task with screenshots, files and a routine" /></div>
+    <div class="steps3">
+      <div class="step"><div class="n bg-sky">1</div><h3>You ask</h3><p>From your phone, in plain words. Send three things in a row; each gets its own answer, in order.</p></div>
+      <div class="step"><div class="n bg-mint">2</div><h3>It replies, then works</h3><p>"On it: checking three sites." Then it works on your Mac, step by step, and you can watch every step live.</p></div>
+      <div class="step"><div class="n bg-gold">3</div><h3>It proves it</h3><p>Screenshots of what it did, the files it made, and an independent double-check that it really happened.</p></div>
+    </div>
+  </section>
+
+  <section id="features" class="reveal">
+    <div class="eyebrow">Features</div>
+    <h2>Everything a real assistant needs. Nothing it shouldn't do.</h2>
+    <div class="grid">
+      <div class="card shot span-7"><h3>A team of bots in one chat</h3><p>Make a group. The lead splits the job and hands parts to the others; they work at the same time, and you see every hand-off. Type @ to ask one directly.</p><div class="crop bg-sky pad"><img src="assets/group.jpg" alt="" /></div></div>
+      <div class="card shot span-5"><h3>Nothing goes out without you</h3><p>Emails and messages arrive as drafts you can edit. Paying, deleting and sending always ask first.</p><div class="crop bg-gold"><img src="assets/chat-draft.jpg" alt="" style="top:-205px" /></div></div>
+      <div class="card span-4"><div class="ico bg-mint"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8M12 16v4" /></svg></div><h3>Your Mac, from your phone</h3><p>See the Mac's screen live and take over with taps and typing, like Chrome Remote Desktop.</p></div>
+      <div class="card span-4"><div class="ico bg-pink"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg></div><h3>Routines that run themselves</h3><p>"Every weekday at 9, brief me on my inbox." Or start from an email, a file, or a link.</p></div>
+      <div class="card span-4"><div class="ico bg-lilac"><svg viewBox="0 0 24 24"><path d="M4 10v4M8 7v10M12 4v16M16 7v10M20 10v4" /></svg></div><h3>Talk to it</h3><p>Hands-free talk mode: it listens, answers out loud, and keeps working.</p></div>
+      <div class="card shot span-5"><h3>Proof of work</h3><p>Screenshots of every browser job, a replay of what it clicked, and the files and events it made.</p><div class="crop bg-peach"><img src="assets/chat-board.jpg" alt="" style="top:-232px" /></div></div>
+      <div class="card shot span-7"><h3>One place for everything</h3><p>What needs you, what's running, what each bot did today, every routine and skill. Press ⌘K to jump anywhere.</p><div class="crop bg-mint pad"><img src="assets/control.jpg" alt="" /></div></div>
+      <div class="card span-4"><div class="ico bg-gold"><svg viewBox="0 0 24 24"><path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z" /><path d="M4 19V5" /></svg></div><h3>Teach it by showing</h3><p>Do a task once on the Mac. Blip watches, writes the steps, and does it for you from then on.</p></div>
+      <div class="card span-4"><div class="ico bg-sky"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" /></svg></div><h3>Works from anywhere</h3><p>Your phone reaches your Mac from any network or country. One tap sets it up, nothing to install.</p></div>
+      <div class="card span-4"><div class="ico bg-pink"><svg viewBox="0 0 24 24"><rect x="5" y="10.5" width="14" height="10" rx="2.5" /><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5" /></svg></div><h3>Chat lock and memory</h3><p>Lock any chat with Face ID. It remembers what you told it, even months later.</p></div>
+    </div>
+  </section>
+
+  <div class="story reveal">
+    <div>
+      <blockquote>"I didn't open my laptop for 10 days. Blip did my work."</blockquote>
+      <p>For ten days I ran everything through Blip from my phone. One prompt at a time, it built a ClickUp-style project platform for my company and set up many of my day-to-day automations, while the Mac sat at home doing the work.</p>
+      <div class="who"><i><svg viewBox="40 20 140 170"><use href="#blip" /></svg></i><div><b>Samanway Baranwal</b><br /><span>Made Blip</span></div></div>
+    </div>
+    <div class="stats">
+      <div class="stat"><b>10 days</b><span>without opening the laptop</span></div>
+      <div class="stat"><b>1 prompt</b><span>at a time, from a phone</span></div>
+      <div class="stat"><b>$0</b><span>extra: it runs on your Claude plan</span></div>
+    </div>
+  </div>
+
+  <section id="install" class="reveal">
+    <div class="eyebrow">Get started</div>
+    <h2>Your own AI agent in 5 steps.</h2>
+    <p class="sub">You need a Mac that can stay on (an old MacBook is perfect) and your phone. About 15 minutes.</p>
+    <div class="install-steps">
+      <div class="istep"><div class="n bg-sky">1</div><div><h3>Prepare the Mac</h3><p>Plug it in and install:</p><ul><li><a href="https://www.google.com/chrome/">Google Chrome</a>. Your bots browse with it; no extension needed.</li><li><a href="https://brew.sh">Homebrew</a>, the one line on its home page.</li><li>Apple's developer tools: run <code>xcode-select --install</code> in Terminal.</li></ul></div></div>
+      <div class="istep"><div class="n bg-mint">2</div><div><h3>Install Blip</h3><p>Paste this in Terminal. It installs everything else, including the Cloudflare tunnel for using it from anywhere, and starts Blip.</p><div class="install"><code><b>$</b> curl -fsSL https://raw.githubusercontent.com/SamanwayBaranwal/blip/main/install.sh | zsh</code><button class="copy" data-copy="curl -fsSL https://raw.githubusercontent.com/SamanwayBaranwal/blip/main/install.sh | zsh">Copy</button></div></div></div>
+      <div class="istep"><div class="n bg-gold">3</div><div><h3>Connect Claude</h3><p>Install <a href="https://claude.com/claude-code">Claude Code</a> and sign in once. Blip runs on your Claude plan, or you can use an API key.</p></div></div>
+      <div class="istep"><div class="n bg-pink">4</div><div><h3>Allow the Mac permissions</h3><p>System Settings → Privacy &amp; Security → turn on <b>node</b> under <b>Screen &amp; System Audio Recording</b> and <b>Accessibility</b>, so you and your bots can see and use the screen. Then in Blip: Settings → Check Mac access.</p></div></div>
+      <div class="istep"><div class="n bg-lilac">5</div><div><h3>Put it on your phone</h3><p>Open Blip on the Mac and tap <b>Set up</b>. Turn on your link, add your email and a new Gmail for Blip, and it emails you a one-tap link. Add it to your Home Screen. Done.</p></div></div>
+    </div>
+  </section>
+
+  <section id="safety" class="reveal">
+    <div class="eyebrow">Safety</div>
+    <h2>Powerful, and on a short leash.</h2>
+    <div class="safety">
+      <div class="card"><h3>Asks before it acts</h3><p>Sending, paying, deleting, booking and accepting always come to you as a card first. Tap Allow or Deny, even from the notification.</p></div>
+      <div class="card"><h3>A second pair of eyes</h3><p>An independent reviewer checks risky actions, and a double-check confirms the work really happened.</p></div>
+      <div class="card"><h3>Your data stays home</h3><p>Everything lives on your Mac. Passwords go into the Mac's Keychain; bots only ever see a placeholder.</p></div>
+    </div>
+  </section>
+
+  <section id="faq" class="reveal">
+    <div class="eyebrow">FAQ</div>
+    <h2>Questions, answered.</h2>
+    <div class="faq">
+      <details><summary>Is Blip free?</summary><p>Yes. Blip is open source. It runs on your existing Claude plan through Claude Code, or on an Anthropic API key with a daily spending limit you set.</p></details>
+      <details><summary>Which Mac do I need?</summary><p>Any Mac that can stay on and logged in, Apple Silicon or Intel. An old MacBook works well. Keep it plugged in with the lid open.</p></details>
+      <details><summary>Do I need an app from the App Store?</summary><p>No. Blip installs on your iPhone or Android Home Screen straight from the browser, with notifications. There's also a Mac app.</p></details>
+      <details><summary>Can I use it when I'm away from home?</summary><p>Yes. "Use Blip anywhere" connects your phone to your Mac from any network or country, through a secure Cloudflare tunnel or Tailscale. Everything stays behind your sign-in.</p></details>
+      <details><summary>Will it buy things or send emails on its own?</summary><p>No. Anything that sends, pays, deletes, books or accepts always waits for your approval, and emails come to you as drafts you can edit first.</p></details>
+      <details><summary>Where does my data go?</summary><p>Your chats, files, memory and passwords stay on your Mac. The AI model processes your requests; nothing else goes to a Blip server, because there isn't one.</p></details>
+    </div>
+  </section>
+
+  <div class="final reveal">
+    <svg class="mascot-big" viewBox="40 20 140 170"><use href="#blip" /></svg>
+    <h2>Give your old Mac a new job.</h2>
+    <p class="sub" style="margin:0 auto">Set up Blip in 15 minutes and get your own always-on AI agent in your pocket.</p>
+    <div class="ctas"><a class="btn" href="#install">Get Blip</a><a class="btn ghost" href="https://github.com/SamanwayBaranwal/blip">Star on GitHub</a></div>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <a class="brand" href="#" style="font-size:16px"><svg viewBox="40 20 140 170" style="width:22px;height:22px"><use href="#blip" /></svg>Blip</a>
+    <span>Open source. Made by Samanway Baranwal.</span>
+    <span class="spacer"></span>
+    <a href="https://github.com/SamanwayBaranwal/blip">GitHub</a>
+    <a href="#install">Install</a>
+    <a href="#faq">FAQ</a>
+  </div>
+</footer>
+
+<script>
+  // Copy buttons
+  document.querySelectorAll(".copy").forEach((b) => b.addEventListener("click", async () => {
+    try { await navigator.clipboard.writeText(b.dataset.copy); b.textContent = "Copied"; } catch { b.textContent = "Select it"; }
+    setTimeout(() => (b.textContent = "Copy"), 1600);
+  }));
+  // A line under the nav once you scroll
+  const nav = document.getElementById("nav");
+  addEventListener("scroll", () => nav.classList.toggle("scrolled", scrollY > 8), { passive: true });
+  // Sections fade in as they arrive
+  const io = new IntersectionObserver((es) => es.forEach((e) => e.isIntersecting && (e.target.classList.add("in"), io.unobserve(e.target))), { threshold: 0.12 });
+  document.querySelectorAll(".reveal").forEach((el) => io.observe(el));
+</script>
+</body>
+</html>
