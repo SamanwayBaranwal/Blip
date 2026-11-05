@@ -1,292 +1,146 @@
+<div align="center">
+
+<a href="https://blip-jade.vercel.app"><img src="site/assets/social.png" alt="Blip: an AI agent with its own computer" width="100%" /></a>
+
 # Blip
 
-Your own always-on AI agents, running on your Mac and controlled from your phone, in the style of xAI's Grok Bot and ChatGPT's Dots.
+**An AI agent with its own computer.**<br />
+It lives on your Mac and does the real work. You message it from your phone, from anywhere.
 
-Meet **Blip**: a mouse pointer that came alive and does things on your computer for you. It's the app's mascot, and it shows what each bot is doing. It bobs while idle, clicks away while working, holds up a "!" when it needs you, and celebrates when a task is done. Every bot can dress its own Blip: body colors, hats (including a ₿ cap and a crown), glasses and shades, mustaches and beards, a ₿ chain or bow tie, and something to hold, like a Bitcoin coin or coffee.
+[![License: MIT](https://img.shields.io/badge/license-MIT-141413?style=flat-square)](LICENSE)
+[![macOS](https://img.shields.io/badge/runs%20on-macOS-141413?style=flat-square&logo=apple&logoColor=white)](#install-in-5-steps)
+[![Built on Claude](https://img.shields.io/badge/built%20on-Claude%20Agent%20SDK-141413?style=flat-square)](https://docs.claude.com/en/docs/agent-sdk/overview)
+[![iPhone and Android](https://img.shields.io/badge/phone-iPhone%20%26%20Android-141413?style=flat-square)](#install-in-5-steps)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-141413?style=flat-square)](CONTRIBUTING.md)
 
-Every bot has the Mac as its computer: a terminal, files, a real Chrome browser, and control of Mac apps. You talk to your bots in the Blip app (installed on your phone's Home Screen) or, optionally, Telegram. Risky actions come to you as approval cards first.
+[Website](https://blip-jade.vercel.app) · [Install](#install-in-5-steps) · [Features](#features) · [How it works](#how-it-works) · [Full guide](docs/GUIDE.md)
 
-## Why I built it
+</div>
 
-For the last 10 days I've run my work through Blip from my phone, testing it as hard as I could. I didn't open my laptop once. One prompt at a time, it built a ClickUp-style project platform for my company and set up many of my day-to-day automations, while the Mac sat at home doing the work.
+---
 
-That's the idea: an AI agent with its own computer that you message like a person, from anywhere.
+## Quick start
 
-## Get your own AI agent in 5 steps
+1. **Get a Mac that stays on** (a Mac mini or an old MacBook) with [Chrome](https://www.google.com/chrome/), [Homebrew](https://brew.sh) and `xcode-select --install`.
+2. **Install Blip:** `curl -fsSL https://raw.githubusercontent.com/SamanwayBaranwal/blip/main/install.sh | zsh`
+3. **Connect Claude:** install [Claude Code](https://claude.com/claude-code) and sign in once, or add an Anthropic API key in the app.
+4. **Allow the Mac permissions:** turn on **node** under Screen Recording and Accessibility, then run `~/Blip/blip.sh restart`.
+5. **Put it on your phone:** open Blip on the Mac, tap **Set up**, email yourself the link, and add it to your Home Screen.
 
-You need a Mac that can stay on (an old MacBook is perfect) and a phone.
+More detail on each step is in [Install in 5 steps](#install-in-5-steps).
 
-**1. Prepare the Mac.** Plug it in, sign in to it, and install:
-- **[Google Chrome](https://www.google.com/chrome/).** Your bots browse with it. No extension needed: Blip drives Chrome itself, through Playwright.
-- **[Homebrew](https://brew.sh)**, the one line on its home page.
-- **Apple's developer tools:** in Terminal, run `xcode-select --install` and click Install.
+## Why Blip
 
-**2. Install Blip.** In Terminal, paste:
+> "I didn't open my laptop for 10 days. Blip did my work."
+
+For ten days I ran my work through Blip from my phone. One prompt at a time, it built a ClickUp-style project platform for my company and set up many of my day-to-day automations, while the Mac sat at home doing the work.
+
+Blip gives an AI a real computer: a terminal, files, a real Chrome browser and your Mac's own apps. It tells you what it's about to do, does it, and shows you the proof. Anything that sends, pays or deletes waits for your OK.
+
+**Got a Mac mini sitting there?** Maybe you bought it for OpenClaw. Blip runs on the same machine, installs in one line, and turns it into an agent you use every day from your phone.
+
+## See it
+
+<table>
+  <tr>
+    <td width="33%"><img src="site/assets/chat-board.jpg" alt="Blip replies first, works, then shows the files and screenshots" /></td>
+    <td width="33%"><img src="site/assets/group.jpg" alt="A group chat where three bots split one job" /></td>
+    <td width="33%"><img src="site/assets/chat-draft.jpg" alt="An email draft waiting for approval" /></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Replies first, then works</b><br /><sub>Steps, files and screenshots as proof</sub></td>
+    <td align="center"><b>A team of bots</b><br /><sub>The lead splits the job; they work at once</sub></td>
+    <td align="center"><b>Nothing goes out without you</b><br /><sub>Drafts you edit, then approve</sub></td>
+  </tr>
+</table>
+
+## Features
+
+| | |
+|---|---|
+| **Talks while it works** | Replies "On it" in seconds, then works. Send three messages and each gets its own answer, in order. |
+| **Real computer** | Terminal, files, a real Chrome browser with your logins, and Mac apps: Calendar, Reminders, Contacts, Mail, Spotlight. |
+| **Group chats** | Put several bots in one chat. The lead hands parts to the others, and they work in parallel. `@Name` asks one directly. |
+| **Proof of work** | Screenshots of what it did, a replay of its browser session, the files it made, and an independent double-check. |
+| **You stay in control** | Approval cards for anything risky, editable drafts, Auto Review, "Ask first" rules, and Allow / Deny right on the notification. |
+| **Remote control** | See and use the Mac's screen from your phone, like Chrome Remote Desktop. |
+| **Routines and triggers** | "Every weekday at 9, brief me on my inbox." Or start a routine from an email, a new file or a link. |
+| **Use it anywhere** | One tap sets up a secure link from any network or country. Nothing to install on the phone. |
+| **Voice** | Hands-free talk mode, voice messages and spoken replies. Speech-to-text runs on the Mac. |
+| **Memory and skills** | It remembers what you told it, searches every past chat, and learns skills, including by watching you do a task once. |
+| **Its own email** | Give it a mailbox. People can email your bot; every reply is a draft you approve. |
+| **Privacy** | Lock chats with a passcode or Face ID. Passwords live in the Mac's Keychain; bots only see placeholders. |
+| **Phone app** | Installs on your iPhone or Android Home Screen from the browser, with notifications. There's a Mac app too. |
+
+Every feature is described in detail in the [full guide](docs/GUIDE.md).
+
+## Install in 5 steps
+
+You need a Mac that can stay on (a Mac mini or an old MacBook is perfect) and your phone. It takes about 15 minutes.
+
+**1. Prepare the Mac.** Plug it in, then install [Google Chrome](https://www.google.com/chrome/) (no extension needed), [Homebrew](https://brew.sh), and Apple's developer tools:
+
+```bash
+xcode-select --install
+```
+
+**2. Install Blip.** It installs everything else (Node.js, ffmpeg, speech-to-text, the Cloudflare tunnel) and starts Blip in `~/Blip`:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/SamanwayBaranwal/blip/main/install.sh | zsh
 ```
 
-It installs everything else on its own (Node.js, ffmpeg, speech-to-text, and the **Cloudflare tunnel** that lets your phone reach the Mac from anywhere in the world) and starts Blip in `~/Blip`.
+**3. Connect Claude.** Install [Claude Code](https://claude.com/claude-code) and sign in once: Blip runs on your Claude plan. Or add an Anthropic API key in the app.
 
-**3. Connect Claude.** Install [Claude Code](https://claude.com/claude-code) and sign in once: Blip runs on your Claude plan. Or paste an Anthropic API key in the app instead.
+**4. Allow the Mac permissions.** In **System Settings → Privacy & Security**, turn on **node** under **Screen & System Audio Recording** and **Accessibility**. Then run `~/Blip/blip.sh restart`, and in Blip open **Settings → This Mac → Check Mac access**.
 
-**4. Allow the Mac permissions.** Open **System Settings → Privacy & Security** and turn on **node** under:
-- **Screen & System Audio Recording**, so you can see the Mac's screen from your phone (like Chrome Remote Desktop) and bots can see what they're doing.
-- **Accessibility**, so you and your bots can click and type.
+**5. Put it on your phone.** Open Blip on the Mac and tap **Set up**:
+1. Turn on your link.
+2. Add your email.
+3. Add a new Gmail for Blip, with an [app password](https://myaccount.google.com/apppasswords).
+4. Tap **Email me the link**. Open the email on your phone and tap the link, then use *Share → Add to Home Screen*.
 
-Then run `~/Blip/blip.sh restart`. In the Blip app, open **Settings → This Mac → Check Mac access** and click Allow on the Mac for Calendar, Reminders, Contacts and Mail.
+Running the install line again updates Blip. More details are in [Set up on a new Mac](docs/GUIDE.md#set-up-on-a-new-mac).
 
-**5. Put it on your phone, from anywhere.** Open Blip on the Mac and tap **Set up** in the bar at the top:
-- **Turn on your link.** Tap *Quick link*. No account, it works from any network or country.
-- **Your email.** Where Blip sends your link.
-- **Blip's own email.** Make a new Gmail just for Blip, turn on 2-step verification, [create an app password](https://myaccount.google.com/apppasswords), and paste both. Blip sends from it, and people can email your bot.
-- **Email me the link.** Open the email on your phone and tap the link: you're signed in. Then *Share → Add to Home Screen*. Or scan the QR code on the Mac's screen.
+## How it works
 
-Done. Your personal AI agent is in your pocket, and it does the work on your Mac while you're anywhere.
-
-Running the install line again updates Blip. Keep the Mac awake on the charger with `sudo pmset -c sleep 0 disksleep 0 womp 1 autorestart 1 displaysleep 10` and keep the lid open.
-
-Want to add a skill, a tool or a connector? See [CONTRIBUTING.md](CONTRIBUTING.md).
-
-## What it does
-
-- **Several bots** with their own name, job, personality, model, memory and conversation. A primary bot runs proactive check-ins, and bots can hand work to each other.
-- **A live progress view** that shows each task's plan and every step as it happens. You can steer a bot mid-task or stop it.
-- **Approval cards**: Allow once / Allow for this task / Always allow / Deny.
-- **Auto Review**: an independent AI check on risky actions.
-- **"Ask first" rules**, and a guard built into the code that always asks before anything that sends, pays, deletes, books or accepts.
-- **Drafts** you can edit, then send or discard.
-- **Take over**: watch the Mac's screen live from your phone and take control for passwords, codes and payments.
-- **Routines** that run on a schedule, with test runs, plus starter templates.
-- **Skills** you teach once and reuse. **Connectors** (MCP servers) with read, full or off access.
-- **Proactive suggestions**, read-only and at most 3 a day.
-- **A secrets vault**: a bot asks for a password or API key on a masked card, and it's saved in the Mac's Keychain. Bots only ever see a placeholder like `{{secret:github-token}}`. Blip fills in the real value when an action runs, after you approve it, and scrubs it from anything a tool sends back. Manage your secrets in **Settings → Secrets**.
-- **Files panel**, **editable memory**, 👍/👎 feedback, **voice in and out**, **push notifications**, activity history and an action log.
-- **Runs on your Claude plan** with no API key, or on an Anthropic API key with a daily spending limit.
-- **Replies stream in** word by word, in Blip's own voice: sharp and direct, never corporate. Each bot has a personality setting: Professional, Blip or Spicy.
-- **Searchable memory**: bots search everything they've been told, including every past chat, even after New chat.
-- **Your Mac's own apps**: bots read your Calendar, Reminders, Contacts and Mail inbox and find files with Spotlight, directly and without clicking around. They add events and reminders with your approval.
-- **Event triggers**: a routine can start from a private link (iPhone Shortcuts, scripts), a new file in a folder, or an email from a given sender, not only on a schedule.
-- **Teach by showing**: record yourself doing a task once (up to 10 minutes), and the bot writes it up as a skill you can read and edit.
-- **Own browser per bot** (optional): a bot can browse at the same time as the others instead of taking turns.
-- **Group chats**: put 2 to 6 bots in one chat. The lead hands parts of the job to the others, they work at the same time, and you watch every hand-off. Write "@Name" to ask one bot. Bots can also make **helper bots** for a job, which are tidied away after a week unused.
-- **Work replay**: every browser session is recorded, so you can watch what a bot did (at 2× speed) instead of watching it live.
-- **Pages**: bots make clean documents and slide decks, sent to your chat as a PDF.
-- **X, read-only**: bots search X through your logged-in browser and summarise what people are saying. They never like, repost, reply or follow without asking.
-- **Its own email address**: connect a mailbox you made for Blip and people can email your bot. It reads new mail, tells you what matters, and drafts replies you approve before anything is sent.
-- **Talk mode**: a hands-free conversation (it listens, answers out loud and listens again), or hold the mic to send a voice message. Speech is turned into text on the Mac itself.
-- **Double-checks its work**: after a task that changes files, your calendar, reminders, routines or skills, an independent checker confirms it really happened.
-- **Skills you can share**: export or import any skill as one `.md` file, every edit keeps the old version, and a library of examples comes with Blip. When you ask for the same thing three times, Blip offers to save it as a skill.
-- **Replies first, then works**: on any job it tells you right away what it's about to do, then does it, and answers your messages mid-task while it keeps going. One bot can work in a group and in its own chat at the same time.
-- **Chat lock**: lock any chat (or the whole app) behind a passcode or Face ID, like WhatsApp. Locked chats show no previews and their notifications don't show the text.
-- **Always clear what's happening**:
-  - A status line under the input says what the bot is doing: listening, thinking, the current step, running a routine, waiting for you, speaking.
-  - A strip at the top shows every running task, anything waiting for you, the next routine and the last check-in.
-  - Suggestions and failed checks wait in a tray at the top of the chat, one tap each.
-  - Files, events, reminders, skills and routines a task made show as chips on the task, with a short confirmation.
-  - Type "/" for commands and skills.
-  - Android and desktop notifications have Allow / Deny buttons.
-- **Looks after itself**:
-  - a nightly backup and a nightly self-test that reports in one quiet line
-  - Recover and Reset buttons
-  - an "offline since" screen when the Mac can't be reached
-
-## Requirements
-
-- A Mac (Apple Silicon recommended) that stays on and logged in.
-- [Homebrew](https://brew.sh).
-- **Either** Claude Code signed in once on this Mac (Blip then uses your Claude plan), **or** an Anthropic API key from [platform.claude.com](https://platform.claude.com/settings/keys).
-- Google Chrome. The bots' browser uses it.
-
-## Set up on a new Mac
-
-> **Put Blip in your home folder (`~/Blip`), not on the Desktop or in Documents or Downloads.** macOS blocks background apps from those folders, and the script refuses to run there.
-
-```bash
-# 1. Get the code (use your own repo URL)
-git clone https://github.com/<you>/blip.git ~/Blip
-cd ~/Blip
-
-# 2. Install everything (Node.js, tools, packages, speech model) and build
-./blip.sh setup
-
-# 3. Sign in to Claude Code once, so Blip can use your Claude plan.
-#    Install it from https://claude.com/claude-code (the CLI or the VS Code extension), then sign in.
-#    Skip this if you'll use an API key instead.
-
-# 4. Start Blip. It runs in the background and starts at every login.
-./blip.sh install
-
-# 5. Install the Mac app (Dock icon, notifications, Dock badge)
-./blip.sh app
+```mermaid
+flowchart LR
+  P["Your phone<br/>(Blip app)"] -- "secure link<br/>Cloudflare or Tailscale" --> S["Blip on your Mac<br/>app server · scheduler · approvals"]
+  T["Telegram<br/>(optional)"] --> S
+  S --> B1["Bot"] & B2["Bot"] & B3["Bot"]
+  B1 & B2 & B3 --> C["Claude<br/>(Agent SDK)"]
+  B1 & B2 & B3 --> K["The Mac<br/>Chrome · terminal · files · Mac apps · email"]
 ```
 
-## Apps
+- Each bot is a [Claude Agent SDK](https://docs.claude.com/en/docs/agent-sdk/overview) agent with Blip's own tools, a real Chrome browser (Playwright) and any connectors you add.
+- Bots work in parallel. They take turns only on the shared screen and browser.
+- Everything (chats, memory, files, settings) stays on your Mac. There is no Blip server.
+- Built with TypeScript and Node.js, with a [Preact](https://preactjs.com) app and a small Swift helper for the Mac. See [How it's built](docs/GUIDE.md#how-its-built).
 
-**Mac.** `./blip.sh app` builds a native `Blip.app` and puts it in Applications. It signs in by itself and adds:
-- Mac notifications when Blip needs you or replies
-- a Dock badge counting approvals waiting for you
-- a working mic and file picker
-- downloads saved to your Downloads folder
+## Safety
 
-Right-click its Dock icon → **Options → Keep in Dock**.
+- **Asks before it acts.** Sending, paying, deleting, booking and accepting always come to you as a card first, whatever your other rules say.
+- **A second pair of eyes.** An independent reviewer checks risky actions, and a double-check confirms the work really happened.
+- **Your secrets stay secret.** Passwords go into the Mac's Keychain; bots only ever see a placeholder, and tool output is scrubbed.
+- **Your data stays home.** Chats, memory and files live on your Mac. Only your requests go to the AI model.
 
-**iPhone and Android (no App Store).** Blip installs from the browser as a Home Screen app:
+More in [Security notes](docs/GUIDE.md#security-notes).
 
-1. On the Mac, open Blip → **Settings → Connect your phone → Show code**.
-2. On your phone, open the link it shows: Safari on iPhone, Chrome on Android.
-3. iPhone: tap **Share → Add to Home Screen**. Android: tap **Install app**.
-4. Open Blip from the Home Screen and type the 6-digit code. It works once and expires after 10 minutes.
+## FAQ
 
-### Use it from anywhere (another network, another country)
+**Is it free?** Yes: open source under MIT. It runs on your Claude plan, or on an API key with a daily spending limit.
 
-The home Wi-Fi link only works on the same network. Phones also only allow notifications and the mic over `https://`. **Settings → Use Blip anywhere** fixes both, with nothing to install on the phone:
+**Which Mac?** Any Mac that can stay on, Apple Silicon or Intel. A Mac mini is ideal.
 
-- **Quick link (no account).** Blip opens a secure Cloudflare tunnel to this Mac. The link changes when the Mac restarts; Blip then **emails you the new link** (with a one-tap sign-in) and pings your phone.
-- **Permanent link (Tailscale).** Install [Tailscale](https://tailscale.com/download/mac) on the Mac only and sign in once (Google, Apple or Microsoft). Choose *Permanent link*; the first time, Tailscale asks you to tap **Enable** in the browser. The link never changes.
+**Already running another agent on that Mac mini?** Blip installs into its own folder (`~/Blip`) as its own background service, so you can try it alongside.
 
-Either way, everything except the sign-in page stays locked behind your sign-in. Sign-in links in emails and QR codes work once and expire.
+**Do I need the App Store?** No. The phone app installs from the browser.
 
-After adding Blip to the Home Screen from the anywhere link, go to **Settings → Notifications → Turn on**.
+## Contributing
 
-Prefer a private link only your own devices can open? Install Tailscale on the Mac and the phone and run `./blip.sh remote`.
+Ideas, skills, tools and fixes are welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md), then open an issue or a pull request. Run `npm test` (unit tests) and `npm run test:golden` (end-to-end, on a throwaway server) before sending a change.
 
-### Control the Mac from your phone
+## License
 
-In the app, tap the computer icon and then **Control this Mac**. It works like Chrome Remote Desktop: a live video of the screen, full screen on your phone.
-
-- **Trackpad mode:**
-  - drag to move the pointer and tap to click
-  - tap twice to double-click
-  - two-finger tap for right-click
-  - two fingers up or down to scroll
-  - hold, then drag, to drag things
-- **Touch mode:** tap exactly where you want to click.
-- **Pinch** to zoom in on small text.
-- **Keyboard** opens your phone's keyboard, and every key goes straight to the Mac, in any language.
-- **Clipboard** (under Keys): paste your phone's clipboard onto the Mac, or copy the Mac's clipboard to your phone.
-- **Keys** has Esc, Tab, ⌘C, ⌘V, Spotlight, the arrows and more.
-- **Quality:** Auto (the default) adjusts to your connection the way Chrome Remote Desktop does. You can also pick Smooth, Sharp or Data saver.
-
-It streams real video (H.264, encoded by the Mac's hardware) and sends input over one live connection, so it stays smooth even on mobile data. The live chip shows the frame rate and the delay. For the fastest clicks and typing, install Apple's command line tools once on the Blip Mac (`xcode-select --install`). Blip then builds its native input helper by itself.
-
-### macOS permissions
-
-For the Computer panel (watching and controlling the screen) and for bots that use Mac apps, open **System Settings → Privacy & Security** and turn on **node** under:
-
-- **Screen & System Audio Recording**
-- **Accessibility**
-
-Then run `./blip.sh restart`.
-
-The first time a bot reads your Calendar, Reminders, Contacts or Mail, macOS asks for permission on the Blip Mac; click Allow. Mail must be open there for bots to read it.
-
-Calendar, Reminders and Contacts access and the fastest remote control use two small helpers that Blip builds itself. They need Apple's command line tools, installed once with `xcode-select --install`.
-
-### Voice messages don't work
-
-Voice needs Homebrew's `whisper.cpp`. Homebrew renamed it from `whisper-cpp`, so older setups may have missed it. On the Mac running Blip, run:
-
-```bash
-HOMEBREW_NO_AUTO_UPDATE=1 brew install whisper.cpp
-```
-
-If Homebrew says a folder isn't writable, run `sudo chown -R $(whoami) $(brew --prefix)/share/man` first. The mic also needs the secure `https://` Tailscale link on phones.
-
-### Keeping the Mac awake (optional)
-
-To keep the Mac awake on the charger, restart it after a power cut, and allow network wake-ups:
-
-```bash
-sudo pmset -c sleep 0 disksleep 0 womp 1 autorestart 1 displaysleep 10
-```
-
-Keep the lid open: a MacBook sleeps when the lid is closed.
-
-## Everyday commands
-
-| Command | What it does |
-|---|---|
-| `./blip.sh setup` | First-time install of everything |
-| `./blip.sh install` | Build, start, and start at every login |
-| `./blip.sh restart` | Rebuild and restart, for example after editing `.env` or code. Also starts Blip again after `stop`. |
-| `./blip.sh stop` | Stop the background service |
-| `./blip.sh status` | Show whether it's running |
-| `./blip.sh logs` | Follow the log |
-| `./blip.sh link` | Show the app link and QR code again |
-| `./blip.sh remote` | Turn on the private Tailscale HTTPS link |
-| `./blip.sh app` | Build the Mac app and install it in Applications |
-| `./blip.sh backups` | List the nightly backups |
-| `./blip.sh restore <file>` | Put a backup back. The current data is moved aside first, so you can undo it. |
-| `npm test` | Unit tests, under a second, nothing touched |
-| `npm run test:golden` | End-to-end tests: a throwaway Blip on Haiku runs about 14 real tasks (about 3 minutes, a few cents) |
-
-**If something gets stuck:** open **Settings → This Mac**.
-- **Recover** stops tasks and restarts the engines and the browser; nothing is lost.
-- **Reset** does the same and also starts a fresh chat for every bot. Memory, routines and secrets are kept.
-
-## Configuration (`.env`)
-
-`./blip.sh setup` creates `.env` from `.env.example`. Every setting is optional.
-
-| Setting | Default | Meaning |
-|---|---|---|
-| `ANTHROPIC_API_KEY` | empty | Empty means use the Claude plan signed in on this Mac. You can also add the key in the app under **Settings → Claude connection**. |
-| `MODEL` | `claude-opus-5-5` | Default model. Each bot can switch to Sonnet or Haiku in the app. |
-| `EFFORT` | `high` | How hard the model thinks |
-| `DAILY_BUDGET_USD` | `10` | Spending cap when using an API key. Warnings at 50%, 80% and 100%. |
-| `FAST_MODEL` | `claude-sonnet-5-5` | With a bot's model on **Auto** (the default), quick chat uses this and real jobs use `MODEL` |
-| `MAX_PARALLEL` | `3` | How many bots can work at the same time. They take turns only on the browser and screen. |
-| `TASK_LIMIT_MIN` | `30` | Time limit for one task, counting only active time. Routines get 15 minutes and check-ins 5. |
-| `BLIP_BROWSER_HEADLESS` | empty | Set to `1` to run the bots' browser invisibly |
-| `REVIEW_MODEL` | `MODEL` | Model used by Auto Review |
-| `PROACTIVE_SCHEDULE` | `0 10,14,18 * * *` | When the primary bot looks for things to suggest (cron, local time) |
-| `TIMEZONE` | the Mac's | Timezone for routines |
-| `WEB_PORT` | `8787` | Port the app is served on |
-| `BOT_NAME` | `Blip` | Name of the first bot |
-| `TELEGRAM_BOT_TOKEN`, `TELEGRAM_OWNER_ID` | empty | Optional Telegram channel that mirrors the app |
-
-## How it's built
-
-```
-src/
-  main.ts           startup: bots, routines, web app, Telegram
-  core.ts           task queue, runs, steering, routines, proactive check-ins, budget
-  agent.ts          one bot run on the Claude Agent SDK (streaming input for mid-task steering)
-  bots.ts           bot profiles, personas, memory files, skills, teammates (subagents)
-  permissions.ts    approval policy: safe list, rules, commit guard, Auto Review, cards
-  review.ts         Auto Review (API key → Messages API; Claude plan → Agent SDK)
-  tools.ts          Blip's own tools: Mac control, files to the app, routines, skills, drafts, takeover, suggestions, connectors
-  mac.ts            screenshots and native clicks/typing (screencapture + cliclick)
-  cards.ts          approval/draft/takeover/suggestion cards that wait for your answer
-  hub.ts            conversations and live events (single source of truth)
-  outbox.ts         posting messages + push notifications
-  web.ts            the app's server: API, live updates (SSE), files, screen control, login
-  notify.ts         Web Push
-  telegram*.ts      optional Telegram channel that mirrors the app
-  routines.ts       cron scheduling
-  store.ts          saved state, spending, run history, audit log
-  templates.ts      starter routines and bot templates
-  voice.ts          Whisper speech-to-text and macOS speech for replies
-web/                the app: Preact + htm with no build step, Geist font, PWA (manifest + service worker), Blip mascot
-mac-app/            native Mac app (Swift + WebKit): notifications, Dock badge, menus; built by blip.sh app
-blip.sh            setup and background-service control (launchd)
-```
-
-Data that stays on the Mac and is never committed:
-
-| Path | What it holds |
-|---|---|
-| `.env` | Settings and keys |
-| `data/` | Saved state, chats, run history, audit log, the app access code, and the bots' browser profile with its logins |
-| `workspace/` | Bots' files, memory and skills |
-| `models/` | The speech model |
-| `logs/` | The log |
-
-## Security notes
-
-- The app needs an access code (`./blip.sh link` shows it). With Tailscale, only your own devices can reach it at all.
-- The bots' terminal never sees your Telegram token. Bots can't change their own permission settings, and protected files always ask first.
-- Anything that sends, pays, deletes or commits always asks you, whatever rules you've saved.
-- Text from web pages, emails and files is treated as information, never as instructions.
+[MIT](LICENSE) © 2026 Samanway Baranwal
