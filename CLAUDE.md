@@ -1,6 +1,6 @@
 # Blip: context for Claude
 
-Read this first. It carries over what earlier sessions built, decided and learned, because chat memory doesn't move between Macs. The user-facing setup is in `README.md`, and the product research is in `docs/RESEARCH.md`.
+Read this first. It carries over what earlier sessions built, decided and learned, because chat memory doesn't move between Macs. The user-facing overview and 5-step install are in `README.md`, every detail is in `docs/GUIDE.md`, the homepage is `site/`, and the product research is in `docs/RESEARCH.md`.
 
 ## What this is
 
@@ -254,7 +254,7 @@ Fixed after a full audit. Keep these invariants:
 - **Alerts:**
   - `settings.healthcheckUrl` (Settings → Outage alerts) or `HEALTHCHECK_URL`: a ping every 5 minutes, plus `/fail` when the self-test fails (healthchecks.io).
   - Public `GET /status` gives one line with no personal data.
-- **Open source:** `install.sh` (a one-line curl install into `~/Blip`; it defaults to github.com/SamanwayBaranwal/blip), `CONTRIBUTING.md`, and a README quick start. There's no LICENSE yet: the user decides.
+- **Open source:** `install.sh` (a one-line curl install into `~/Blip`; it defaults to github.com/SamanwayBaranwal/blip), `CONTRIBUTING.md`, and a README quick start. License: MIT (added 2026-10-26).
 - **Tests:** 40 unit tests (`npm test`, about 6 s, with a 60 s per-test timeout) and 17 golden tasks.
 
 ## Groups, helpers, replay, pages, X, agent email (2026-10-19, evening)
@@ -427,6 +427,35 @@ The goal of this batch was that you never have to guess what Blip is doing.
   - Pending cards expire on restart, so the shooting script patches `/api/thread` responses in the browser to show a draft as pending.
   - Phone shots are 390×844 @3x and are resized to 780 px JPEG.
 - **Golden secrets test:** it now uses the secret without printing it (`test -n … && echo SECRET-IS-SET`). Bots rightly refuse to echo a secret, which made the old test flaky.
+
+## Launch polish (2026-10-26, late)
+
+- **License:** MIT (`LICENSE`, `package.json`), © 2026 Samanway Baranwal.
+- **Website live:** https://blip-jade.vercel.app (Vercel project `blip`, team hano-studios, signed in on this Mac as hanostudiosoperations-boop).
+  - **Redeploy:** copy `site/` (without its README) into a scratch folder and run `npx vercel deploy --prod --yes` there, so no `.vercel` folder lands in the repo. The user asked for it to be live; it isn't connected to GitHub yet.
+  - **Effects:**
+    - a Blip cursor that trails the real one, with click rings
+    - magnetic buttons with a fill sweep, a hero phone tilt (subtle: ±7°/±5°)
+    - word-by-word headline, a two-row marquee of requests
+    - a looping live demo (types, "On it", ticking steps, chips, proof, Done), only while visible
+    - an animated Mac mini section ("Bought a Mac mini for OpenClaw? Give it a new job.")
+    - blur-rise reveals, count-ups, a nav that hides on scroll down
+  - **Touch and reduced motion:** hover effects only run on fine pointers; reduced motion shows everything static.
+  - **Gotcha:** `img { height: auto }` is required, because the width/height attributes stretched the images.
+  - `assets/social.png` (1280×640) is the share image and the README banner.
+- **README** is now a short, professional front page: a banner, badges, Why, screenshots, a features table, 5 steps, a mermaid diagram, Safety, FAQ, Contributing and License. The old long README moved to `docs/GUIDE.md` (anchors: set-up-on-a-new-mac, how-its-built, security-notes).
+- **`.github/`:** bug and feature issue templates, and a PR template.
+
+## One-time setup walkthrough (2026-11-19)
+
+- **`./blip.sh ready`** (`scripts/ready.sh`, also run at the end of `install.sh`): the README's "Make your Blip ready" steps 4–10 in one sitting, so Blip never asks the Mac for a permission later.
+  - Steps: Claude login (keychain item `Claude Code-credentials` or an API key), `pmset` no-sleep and autorestart (sudo), Mail opened once, then `POST /api/check-mac` from the **running service**, so the Allow popups go to Blip/node and not to Terminal.
+  - It then opens the Screen Recording and Accessibility panes, restarts with `launchctl kickstart`, and re-checks. Voice doesn't count as a permission.
+  - It also opens Chrome on `data/browser-profile` for logins, turns on the link (`POST /api/reach`, including Tailscale's enable-Funnel link) and shows a QR code, sets `fullAccess`, and marks `setupDone`.
+  - Questions read `/dev/tty`, so it works under `curl | zsh`.
+- **Testing:** `BLIP_READY_YES=1 BLIP_READY_DRYRUN=1 BLIP_DATA_ROOT=<scratch> BLIP_PORT=8799 zsh scripts/ready.sh` runs against a scratch server with fake Mac data. Dry run never opens a real tunnel.
+- **Not yet tested** on a real fresh Mac, with real popups.
+- **Johannes's MacBook Pro (the Blip Mac) has about 25 changes that aren't in this copy** (PDF of 19 Nov: the Playwright Extension mode, 60 fps remote, guest links, priority bots, the dispatcher rule…). Merge that copy before building more here.
 
 ## How the code fits together
 

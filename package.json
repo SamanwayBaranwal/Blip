@@ -2,7 +2,7 @@
   "name": "blip",
   "version": "1.0.0",
   "private": true,
-  "description": "Blip — your own always-on AI agents (Grok Bot / Dots style) running on your Mac, controlled from your phone.",
+  "description": "Blip \u2014 your own always-on AI agents (Grok Bot / Dots style) running on your Mac, controlled from your phone.",
   "type": "module",
   "main": "dist/main.js",
   "scripts": {
@@ -41,5 +41,6 @@
     "@types/nodemailer": "^6.4.24",
     "@types/web-push": "^3.6.4",
     "typescript": "^7.0.2"
-  }
+  },
+  "license": "MIT"
 }

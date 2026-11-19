@@ -2,6 +2,7 @@
 # Blip control script.
 #   ./blip.sh setup      first time on a new Mac: installs everything Blip needs
 #   ./blip.sh install    build + start now + start automatically at every login
+#   ./blip.sh ready      one-time walkthrough: every permission, logins, your phone link (run again to re-check)
 #   ./blip.sh restart    rebuild and restart (after editing .env or code)
 #   ./blip.sh stop       stop until next install
 #   ./blip.sh logs       follow the log
@@ -129,11 +130,10 @@ case "$1" in
     echo "▸ Building…"
     npm run build --silent
     echo ""
-    echo "✅ Setup done. Next:"
-    echo "   1. Sign in to Claude Code once on this Mac (Blip uses that login until you add an API key)."
-    echo "   2. ./blip.sh install"
-    echo "   3. Open Blip on this Mac and tap Set up: it puts Blip on your phone, from anywhere,"
-    echo "      and emails you the link."
+    echo "✅ Setup done. Next: ./blip.sh install, then ./blip.sh ready (it walks you through everything else, once)."
+    ;;
+  ready)
+    exec zsh "$DIR/scripts/ready.sh"
     ;;
   install)
     check_location

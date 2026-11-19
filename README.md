@@ -8,26 +8,42 @@
 It lives on your Mac and does the real work. You message it from your phone, from anywhere.
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-141413?style=flat-square)](LICENSE)
-[![macOS](https://img.shields.io/badge/runs%20on-macOS-141413?style=flat-square&logo=apple&logoColor=white)](#install-in-5-steps)
+[![macOS](https://img.shields.io/badge/runs%20on-macOS-141413?style=flat-square&logo=apple&logoColor=white)](#make-your-blip-ready)
 [![Built on Claude](https://img.shields.io/badge/built%20on-Claude%20Agent%20SDK-141413?style=flat-square)](https://docs.claude.com/en/docs/agent-sdk/overview)
-[![iPhone and Android](https://img.shields.io/badge/phone-iPhone%20%26%20Android-141413?style=flat-square)](#install-in-5-steps)
+[![iPhone and Android](https://img.shields.io/badge/phone-iPhone%20%26%20Android-141413?style=flat-square)](#make-your-blip-ready)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-141413?style=flat-square)](CONTRIBUTING.md)
 
-[Website](https://blip-jade.vercel.app) · [Install](#install-in-5-steps) · [Features](#features) · [How it works](#how-it-works) · [Full guide](docs/GUIDE.md)
+[Website](https://blip-jade.vercel.app) · [Install](#make-your-blip-ready) · [Features](#features) · [How it works](#how-it-works) · [Full guide](docs/GUIDE.md)
 
 </div>
 
 ---
 
-## Quick start
+## Make your Blip ready
 
-1. **Get a Mac that stays on** (a Mac mini or an old MacBook) with [Chrome](https://www.google.com/chrome/), [Homebrew](https://brew.sh) and `xcode-select --install`.
-2. **Install Blip:** `curl -fsSL https://raw.githubusercontent.com/SamanwayBaranwal/blip/main/install.sh | zsh`
-3. **Connect Claude:** install [Claude Code](https://claude.com/claude-code) and sign in once, or add an Anthropic API key in the app.
-4. **Allow the Mac permissions:** turn on **node** under Screen Recording and Accessibility, then run `~/Blip/blip.sh restart`.
-5. **Put it on your phone:** open Blip on the Mac, tap **Set up**, email yourself the link, and add it to your Home Screen.
+Ten steps, about 15 minutes, done **once**. You give Blip everything it needs from your Mac at the start, so it never has to stop and ask the Mac for a permission later.
 
-More detail on each step is in [Install in 5 steps](#install-in-5-steps).
+**Before you install (5 minutes)**
+
+1. **Get a Mac that stays on.** A Mac mini or an old MacBook, plugged in.
+2. **Install the basics:** [Google Chrome](https://www.google.com/chrome/), [Homebrew](https://brew.sh), and Apple's developer tools (`xcode-select --install`).
+3. **Run the install line.** It installs everything else (Node.js, ffmpeg, speech-to-text, the Cloudflare tunnel), starts Blip in `~/Blip`, and starts the walkthrough for steps 4 to 10.
+
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/SamanwayBaranwal/blip/main/install.sh | zsh
+   ```
+
+**The walkthrough (10 minutes, in the same Terminal window)**
+
+4. **Connect Claude.** Sign in to [Claude Code](https://claude.com/claude-code) once (the walkthrough installs it if needed), or add an Anthropic API key in the app.
+5. **Keep the Mac awake.** One yes, and your Mac password: the Mac never sleeps while plugged in, and it starts again by itself after a power cut.
+6. **Allow Calendar, Reminders, Contacts and Mail.** A few **Allow** popups appear at once: click Allow on each. Mail opens once so it can be allowed too.
+7. **Allow the screen and the mouse.** Two System Settings panes open. Turn on **node** in **Screen & System Audio Recording** and in **Accessibility**. Blip restarts and checks every permission, with a fix for anything that's missing.
+8. **Sign in to your sites.** A Chrome window opens with Blip's own browser. Sign in once to what your bots will use (Gmail, Google Calendar, X, your work tools), so they never hit a login page later. If you use your own Chrome through the Playwright Extension instead, install the extension now.
+9. **Put Blip on your phone.** Choose your link: Cloudflare (no account) or Tailscale (a link that never changes). Scan the QR code, add Blip to your Home Screen (iPhone: *Share → Add to Home Screen*), open it, and allow notifications.
+10. **Choose full access.** Your bots then work without approval cards. Payments, protected files and your own "Ask first" rules still ask: that's the safety net.
+
+That's it. Run `~/Blip/blip.sh ready` again any time to re-check everything (finished steps are skipped), and run the install line again to update Blip. Every detail is in [Set up on a new Mac](docs/GUIDE.md#set-up-on-a-new-mac). Optional extras in the app: give Blip [its own email](docs/GUIDE.md), and add your email in **Set up** so a new Cloudflare link always reaches you.
 
 ## Why Blip
 
@@ -74,34 +90,6 @@ Blip gives an AI a real computer: a terminal, files, a real Chrome browser and y
 
 Every feature is described in detail in the [full guide](docs/GUIDE.md).
 
-## Install in 5 steps
-
-You need a Mac that can stay on (a Mac mini or an old MacBook is perfect) and your phone. It takes about 15 minutes.
-
-**1. Prepare the Mac.** Plug it in, then install [Google Chrome](https://www.google.com/chrome/) (no extension needed), [Homebrew](https://brew.sh), and Apple's developer tools:
-
-```bash
-xcode-select --install
-```
-
-**2. Install Blip.** It installs everything else (Node.js, ffmpeg, speech-to-text, the Cloudflare tunnel) and starts Blip in `~/Blip`:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/SamanwayBaranwal/blip/main/install.sh | zsh
-```
-
-**3. Connect Claude.** Install [Claude Code](https://claude.com/claude-code) and sign in once: Blip runs on your Claude plan. Or add an Anthropic API key in the app.
-
-**4. Allow the Mac permissions.** In **System Settings → Privacy & Security**, turn on **node** under **Screen & System Audio Recording** and **Accessibility**. Then run `~/Blip/blip.sh restart`, and in Blip open **Settings → This Mac → Check Mac access**.
-
-**5. Put it on your phone.** Open Blip on the Mac and tap **Set up**:
-1. Turn on your link.
-2. Add your email.
-3. Add a new Gmail for Blip, with an [app password](https://myaccount.google.com/apppasswords).
-4. Tap **Email me the link**. Open the email on your phone and tap the link, then use *Share → Add to Home Screen*.
-
-Running the install line again updates Blip. More details are in [Set up on a new Mac](docs/GUIDE.md#set-up-on-a-new-mac).
-
 ## How it works
 
 ```mermaid
@@ -120,7 +108,7 @@ flowchart LR
 
 ## Safety
 
-- **Asks before it acts.** Sending, paying, deleting, booking and accepting always come to you as a card first, whatever your other rules say.
+- **Asks before it acts.** By default, sending, paying, deleting, booking and accepting come to you as a card first. With full access on, only payments, protected files and your "Ask first" rules still ask.
 - **A second pair of eyes.** An independent reviewer checks risky actions, and a double-check confirms the work really happened.
 - **Your secrets stay secret.** Passwords go into the Mac's Keychain; bots only ever see a placeholder, and tool output is scrubbed.
 - **Your data stays home.** Chats, memory and files live on your Mac. Only your requests go to the AI model.

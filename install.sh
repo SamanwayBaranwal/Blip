@@ -30,6 +30,5 @@ fi
 cd "$DEST"
 ./blip.sh setup
 ./blip.sh install
-echo ""
-echo "Next: sign in to Claude Code once on this Mac (Blip uses that login), then open the link above on your phone."
-echo "In the app: Settings → This Mac → Check Mac access, to allow Calendar, Reminders, Contacts and Mail."
+# Everything else, in one sitting: Claude, permissions, logins, the phone link (questions read the keyboard)
+./blip.sh ready
