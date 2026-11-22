@@ -246,6 +246,23 @@
   .istep a:hover { text-decoration-color: var(--ink); }
   code.inline { font: 13.5px var(--mono); background: var(--soft); padding: 2px 6px; border-radius: 6px; }
 
+  /* ---------- set up with Claude Code ---------- */
+  .cc { margin-top: 40px; background: var(--paper); border: 1px solid var(--line); border-radius: 22px; padding: 28px; display: grid; grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr); gap: 28px; align-items: start; box-shadow: var(--shadow); }
+  .cc-head { display: flex; align-items: center; gap: 12px; }
+  .cc-logo { width: 46px; height: 46px; border-radius: 14px; background: #fbf1ec; display: grid; place-items: center; flex: none; transition: transform 0.5s var(--spring); }
+  .cc:hover .cc-logo { transform: rotate(-12deg) scale(1.08); }
+  .cc-logo img { width: 26px; height: 26px; }
+  .cc-tag { font: 500 12.5px var(--mono); color: #b9562f; letter-spacing: 0.06em; text-transform: uppercase; }
+  .cc h3 { margin: 18px 0 8px; font-size: 24px; font-weight: 600; letter-spacing: -0.025em; line-height: 1.2; }
+  .cc p { color: var(--ink-2); font-size: 15.5px; margin: 0; }
+  .cc ol { margin: 16px 0 0; padding-left: 20px; display: grid; gap: 6px; color: var(--ink-2); font-size: 15px; }
+  .cc ol a { text-decoration: underline; text-underline-offset: 3px; text-decoration-color: var(--line); }
+  .cc ol a:hover { text-decoration-color: var(--ink); }
+  .cc-prompt { position: relative; background: var(--soft); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+  .cc-bar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 8px 8px 16px; border-bottom: 1px solid var(--line); font: 500 12.5px var(--mono); color: var(--ink-3); }
+  .cc-prompt pre { margin: 0; padding: 16px; max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 12.5px/1.6 var(--mono); color: var(--ink-2); }
+  .cc p.cc-or { margin-top: 18px; font-size: 14.5px; color: var(--ink-3); }
+
   /* ---------- safety + FAQ ---------- */
   .safety { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; margin-top: 44px; }
   .safety .card { padding: 26px; }
@@ -273,6 +290,7 @@
 
   /* ---------- phones and small screens ---------- */
   @media (max-width: 980px) {
+    .cc { grid-template-columns: 1fr; padding: 22px; }
     .hero, .demo-wrap, .mini-wrap { grid-template-columns: minmax(0, 1fr); }
     .hero { padding-top: 40px; }
     .stage { height: 560px; max-width: 520px; margin: 0 auto; width: 100%; }
@@ -470,6 +488,41 @@
         <h2>Your own AI agent in 5 steps.</h2>
         <p class="sub">You need a Mac that can stay on (a Mac mini or an old MacBook is perfect) and your phone. About 15 minutes.</p>
       </div>
+      <div class="cc reveal">
+        <div>
+          <div class="cc-head"><span class="cc-logo"><img src="assets/claude.svg" alt="" /></span><span class="cc-tag">Easiest way · no coding</span></div>
+          <h3>Let Claude Code set it up for you.</h3>
+          <p>Not technical? Paste one message into Claude Code. It installs Blip and walks you through every step in plain words.</p>
+          <ol>
+            <li>Get <a href="https://claude.com/claude-code">Claude Code</a> and sign in.</li>
+            <li>Copy the setup message and paste it into Claude Code.</li>
+            <li>When it asks to run something, say yes. Do what it tells you.</li>
+          </ol>
+          <p class="cc-or">Prefer to do it yourself? The 5 steps are below.</p>
+        </div>
+        <div class="cc-prompt">
+          <div class="cc-bar"><span>Paste this into Claude Code</span><button class="copy" data-copy-from="ccPrompt">Copy</button></div>
+          <pre id="ccPrompt">Set up Blip on this Mac for me: https://github.com/SamanwayBaranwal/blip
+
+I'm not technical, so:
+- Do everything you can yourself, one step at a time. After each step, tell me in plain words what you did and what's next.
+- When something needs me (my Mac password, a popup, a setting to turn on, signing in), tell me exactly what to click or paste, then wait until I say "done".
+- Never ask me to edit files or read code.
+
+The plan:
+1. Read the "Make your Blip ready" part of the README and scripts/ready.sh. Follow them.
+2. Check this Mac has Google Chrome, Homebrew and Apple's developer tools. Install anything missing. Homebrew needs my password, so give me the one line to paste into the Terminal app.
+3. Install Blip into ~/Blip (or update it if it's already there), then run ./blip.sh setup and ./blip.sh install.
+4. Don't run ./blip.sh ready, because it needs a keyboard. Do its steps 4 to 10 yourself, the way the script does:
+   - Claude is already connected, because I'm using Claude Code.
+   - To keep the Mac awake, give me the sudo line to paste into Terminal.
+   - Open each permission screen and tell me what to switch on. Check it worked with Blip's check-mac.
+   - Open Blip's own Chrome so I can sign in to my sites.
+   - Turn on the phone link and show me a QR code to scan (open it as an image).
+   - Before turning on full access, explain it in one sentence and ask me.
+5. Finish by checking everything again, and tell me how to message Blip from my phone.</pre>
+        </div>
+      </div>
       <div class="install-steps">
         <div class="istep reveal"><div class="n bg-sky">1</div><div><h3>Prepare the Mac</h3><p>Plug it in and install:</p><ul><li><a href="https://www.google.com/chrome/">Google Chrome</a>. Your bots browse with it; no extension needed.</li><li><a href="https://brew.sh">Homebrew</a>, the one line on its home page.</li><li>Apple's developer tools: run <code class="inline">xcode-select --install</code> in Terminal.</li></ul></div></div>
         <div class="istep reveal" style="--k:1"><div class="n bg-mint">2</div><div><h3>Install Blip</h3><p>Paste this in Terminal. It installs everything else, including the Cloudflare tunnel for using it from anywhere, and starts Blip.</p><div class="install"><code><b>$</b> curl -fsSL https://raw.githubusercontent.com/SamanwayBaranwal/blip/main/install.sh | zsh</code><button class="copy" data-copy="curl -fsSL https://raw.githubusercontent.com/SamanwayBaranwal/blip/main/install.sh | zsh">Copy</button></div></div></div>
@@ -499,6 +552,7 @@
       <div class="faq reveal" style="--k:1">
         <details><summary>Is Blip free?</summary><p>Yes. Blip is open source under the MIT license. It runs on your existing Claude plan through Claude Code, or on an Anthropic API key with a daily spending limit you set.</p></details>
         <details><summary>Which Mac do I need?</summary><p>Any Mac that can stay on and logged in, Apple Silicon or Intel. A Mac mini is ideal; an old MacBook works too (keep it plugged in with the lid open).</p></details>
+        <details><summary>I'm not technical. Can I still set it up?</summary><p>Yes. Open <a href="https://claude.com/claude-code">Claude Code</a>, paste the message from <a href="#install">Get started</a>, and it does the install for you. It only stops when it needs you to click Allow, sign in or type your Mac password, and it tells you exactly what to do.</p></details>
         <details><summary>I already run another agent on my Mac mini. Can I use Blip too?</summary><p>Yes. Blip installs into its own folder (~/Blip) and runs as its own background service, so you can try it on the same Mac.</p></details>
         <details><summary>Do I need an app from the App Store?</summary><p>No. Blip installs on your iPhone or Android Home Screen straight from the browser, with notifications. There's also a Mac app.</p></details>
         <details><summary>Can I use it when I'm away from home?</summary><p>Yes. "Use Blip anywhere" connects your phone to your Mac from any network or country, through a secure Cloudflare tunnel or Tailscale. Everything stays behind your sign-in.</p></details>
@@ -535,7 +589,7 @@
 
   // Copy buttons
   document.querySelectorAll(".copy").forEach((b) => b.addEventListener("click", async () => {
-    try { await navigator.clipboard.writeText(b.dataset.copy); b.textContent = "Copied"; b.classList.add("done"); } catch { b.textContent = "Select it"; }
+    try { await navigator.clipboard.writeText(b.dataset.copyFrom ? document.getElementById(b.dataset.copyFrom).textContent : b.dataset.copy); b.textContent = "Copied"; b.classList.add("done"); } catch { b.textContent = "Select it"; }
     setTimeout(() => { b.textContent = "Copy"; b.classList.remove("done"); }, 1600);
   }));
 
